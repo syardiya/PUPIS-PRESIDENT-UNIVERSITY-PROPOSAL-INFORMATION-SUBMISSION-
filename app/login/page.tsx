@@ -4,6 +4,7 @@ import React, { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/src/lib/supabase/client";
+import { buildAuthCallbackUrl } from "@/src/lib/supabase/url";
 import {
   isAllowedInstitutionalEmail,
   sanitizeRedirectPath,
@@ -21,7 +22,7 @@ const AUTH_ERROR_MESSAGES: Record<
   auth_callback_failed: {
     title: "Sign-In Verification Failed",
     description:
-      "The authentication link or OAuth code could not be verified or has expired. Please request a fresh sign-in link or continue with Google.",
+      "The Magic Link or one-time verification code could not be verified or has expired. Please request a fresh verification email below.",
   },
   session_expired: {
     title: "Session Expired",
@@ -31,12 +32,12 @@ const AUTH_ERROR_MESSAGES: Record<
   missing_auth_code: {
     title: "Incomplete Sign-In Request",
     description:
-      "No verification code was found in the callback URL. Please initiate sign-in from this page.",
+      "No verification token was found in the callback URL. Please initiate sign-in with your campus email below.",
   },
   auth_user_unavailable: {
     title: "Account Verification Incomplete",
     description:
-      "We could not retrieve your campus identity from the authentication provider. Please try again.",
+      "We could not retrieve your campus identity from the authentication service. Please try again.",
   },
   profile_lookup_failed: {
     title: "Profile Verification Error",
@@ -65,11 +66,7 @@ function LoginFormContent() {
   const [email, setEmail] = useState("");
   const [otpToken, setOtpToken] = useState("");
   const [otpSentTo, setOtpSentTo] = useState<string | null>(null);
-  const [googleDomainHint, setGoogleDomainHint] = useState<
-    "student.president.ac.id" | "president.ac.id"
-  >("student.president.ac.id");
 
-  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [isOtpLoading, setIsOtpLoading] = useState(false);
   const [isVerifyLoading, setIsVerifyLoading] = useState(false);
   const [formError, setFormError] = useState("");
@@ -79,44 +76,9 @@ function LoginFormContent() {
     ? AUTH_ERROR_MESSAGES[errorCode] ?? {
         title: "Authentication Error",
         description:
-          "We could not complete your sign-in request. Please sign in with your President University account.",
+          "We could not complete your sign-in request. Please sign in with your President University email.",
       }
     : null;
-
-  const handleGoogleSignIn = async () => {
-    setFormError("");
-    setInfoMessage("");
-    setIsGoogleLoading(true);
-
-    try {
-      const supabase = createClient();
-      const callbackUrl = new URL("/auth/callback", window.location.origin);
-      callbackUrl.searchParams.set("next", nextPath);
-
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: {
-          redirectTo: callbackUrl.toString(),
-          queryParams: {
-            hd: googleDomainHint,
-            prompt: "select_account",
-          },
-        },
-      });
-
-      if (error) {
-        setFormError(error.message || "Unable to initiate Google sign-in.");
-        setIsGoogleLoading(false);
-      }
-    } catch (err) {
-      setFormError(
-        err instanceof Error
-          ? err.message
-          : "Authentication client is unavailable."
-      );
-      setIsGoogleLoading(false);
-    }
-  };
 
   const handleRequestOtp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -138,36 +100,46 @@ function LoginFormContent() {
 
     setIsOtpLoading(true);
     try {
-      const response = await fetch("/api/auth/otp", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          email: normalizedEmail,
-          next: nextPath,
-        }),
+      const supabase = createClient();
+      const browserOrigin =
+        typeof window !== "undefined" ? window.location.origin : null;
+      const emailRedirectTo = buildAuthCallbackUrl(browserOrigin);
+
+      if (typeof document !== "undefined") {
+        if (nextPath !== "/dashboard") {
+          document.cookie = `pupis_auth_next=${encodeURIComponent(
+            nextPath
+          )}; Path=/; Max-Age=600; SameSite=Lax`;
+        } else {
+          document.cookie = "pupis_auth_next=; Path=/; Max-Age=0; SameSite=Lax";
+        }
+      }
+
+      const { error } = await supabase.auth.signInWithOtp({
+        email: normalizedEmail,
+        options: {
+          shouldCreateUser: true,
+          emailRedirectTo,
+        },
       });
 
-      const payload = (await response.json()) as {
-        ok?: boolean;
-        message?: string;
-        error?: { message?: string };
-      };
-
-      if (!response.ok || !payload.ok) {
+      if (error) {
         setFormError(
-          payload.error?.message ??
-            "Unable to send magic link to this campus email."
+          error.message || "Unable to send Magic Link & OTP to this campus email."
         );
         return;
       }
 
       setOtpSentTo(normalizedEmail);
       setInfoMessage(
-        payload.message ??
-          `Check ${normalizedEmail} for your one-time sign-in link or 6-digit verification code.`
+        `Check ${normalizedEmail} for your Magic Link or 6-digit one-time verification code.`
       );
-    } catch {
-      setFormError("Network error while requesting campus sign-in link.");
+    } catch (err) {
+      setFormError(
+        err instanceof Error
+          ? err.message
+          : "Network error while requesting campus sign-in link."
+      );
     } finally {
       setIsOtpLoading(false);
     }
@@ -176,6 +148,13 @@ function LoginFormContent() {
   const handleVerifyOtpCode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!otpSentTo) return;
+
+    if (!isAllowedInstitutionalEmail(otpSentTo)) {
+      setFormError(
+        "Only @student.president.ac.id and @president.ac.id email addresses are permitted."
+      );
+      return;
+    }
 
     const cleanToken = otpToken.trim();
     if (cleanToken.length < 6) {
@@ -187,7 +166,7 @@ function LoginFormContent() {
     setIsVerifyLoading(true);
     try {
       const supabase = createClient();
-      const { error } = await supabase.auth.verifyOtp({
+      const { data, error } = await supabase.auth.verifyOtp({
         email: otpSentTo,
         token: cleanToken,
         type: "email",
@@ -195,7 +174,32 @@ function LoginFormContent() {
 
       if (error) {
         setFormError(
-          error.message || "Invalid or expired verification code. Please try again."
+          error.message ||
+            "Invalid or expired verification code. Please try again."
+        );
+        return;
+      }
+
+      const verifiedEmail = data.user?.email?.trim().toLowerCase() ?? "";
+      if (!verifiedEmail || !isAllowedInstitutionalEmail(verifiedEmail)) {
+        await supabase.auth.signOut();
+        setFormError(
+          "Access restricted to official President University (@student.president.ac.id and @president.ac.id) accounts."
+        );
+        return;
+      }
+
+      // Ensure campus profile exists in public.users after OTP verification
+      const syncResponse = await fetch("/api/auth/otp", {
+        method: "PUT",
+      });
+      if (!syncResponse.ok) {
+        const syncPayload = (await syncResponse.json().catch(() => null)) as {
+          error?: { message?: string };
+        } | null;
+        setFormError(
+          syncPayload?.error?.message ??
+            "Unable to initialize your campus profile. Please try again."
         );
         return;
       }
@@ -224,7 +228,7 @@ function LoginFormContent() {
           Institutional Sign In
         </h1>
         <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
-          Sign in with your official{" "}
+          Enter your official{" "}
           <span className="font-mono font-medium text-slate-700">
             @student.president.ac.id
           </span>{" "}
@@ -232,7 +236,7 @@ function LoginFormContent() {
           <span className="font-mono font-medium text-slate-700">
             @president.ac.id
           </span>{" "}
-          account.
+          email to receive a Magic Link &amp; one-time code.
         </p>
       </div>
 
@@ -269,187 +273,114 @@ function LoginFormContent() {
         </div>
       )}
 
-      {/* Google Workspace OAuth Section */}
-      <div className="mt-6">
-        <div className="mb-2.5 flex items-center justify-between">
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-            Campus Google Workspace
-          </span>
-          <div
-            role="group"
-            aria-label="Select campus domain hint"
-            className="inline-flex rounded-full border border-[#E2E8F0] bg-[#F8FAFC] p-0.5 text-[11px]"
-          >
-            <button
-              type="button"
-              onClick={() => setGoogleDomainHint("student.president.ac.id")}
-              className={`rounded-full px-2.5 py-0.5 font-semibold transition cursor-pointer ${
-                googleDomainHint === "student.president.ac.id"
-                  ? "bg-[#0F172A] text-white"
-                  : "text-slate-600 hover:text-[#0F172A]"
-              }`}
-            >
-              Student
-            </button>
-            <button
-              type="button"
-              onClick={() => setGoogleDomainHint("president.ac.id")}
-              className={`rounded-full px-2.5 py-0.5 font-semibold transition cursor-pointer ${
-                googleDomainHint === "president.ac.id"
-                  ? "bg-[#0F172A] text-white"
-                  : "text-slate-600 hover:text-[#0F172A]"
-              }`}
-            >
-              Staff / Advisor
-            </button>
-          </div>
-        </div>
-
-        <button
-          type="button"
-          onClick={handleGoogleSignIn}
-          disabled={isGoogleLoading || isOtpLoading || isVerifyLoading}
-          className="flex w-full items-center justify-center gap-3 rounded-full border border-[#E2E8F0] bg-white px-5 py-3 text-sm font-semibold text-[#0F172A] shadow-2xs transition hover:border-slate-300 hover:bg-slate-50 disabled:opacity-60 cursor-pointer"
-        >
-          <svg className="h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              fill="#4285F4"
-              d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v2.98h3.86c2.26-2.09 3.56-5.17 3.56-8.8z"
-            />
-            <path
-              fill="#34A853"
-              d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-2.98c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24z"
-            />
-            <path
-              fill="#FBBC05"
-              d="M5.27 14.31c-.24-.72-.38-1.49-.38-2.31s.14-1.59.38-2.31V6.6H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.4l3.98-3.09z"
-            />
-            <path
-              fill="#EA4335"
-              d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.6l3.98 3.09c.95-2.85 3.6-4.94 6.73-4.94z"
-            />
-          </svg>
-          <span>
-            {isGoogleLoading
-              ? "Redirecting to Google..."
-              : `Continue with Google (@${googleDomainHint})`}
-          </span>
-        </button>
-      </div>
-
-      {/* Divider */}
-      <div className="relative my-6">
-        <div className="absolute inset-0 flex items-center" aria-hidden="true">
-          <div className="w-full border-t border-[#E2E8F0]" />
-        </div>
-        <div className="relative flex justify-center text-[11px] font-semibold uppercase tracking-wider">
-          <span className="bg-white px-3 text-slate-400">
-            Or Email Magic Link / OTP
-          </span>
-        </div>
-      </div>
-
       {/* Institutional Email Magic Link / OTP Form */}
-      {!otpSentTo ? (
-        <form onSubmit={handleRequestOtp} className="space-y-4">
-          <div>
-            <label
-              htmlFor="campus-email"
-              className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-            >
-              Institutional Email
-            </label>
-            <input
-              id="campus-email"
-              type="email"
-              autoComplete="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="name@student.president.ac.id"
-              className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm text-[#0F172A] placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-            />
-          </div>
-
-          {formError && (
-            <div
-              role="alert"
-              className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700"
-            >
-              {formError}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={isOtpLoading || isGoogleLoading}
-            className="w-full rounded-full bg-[#0F172A] px-5 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-60 cursor-pointer"
-          >
-            {isOtpLoading
-              ? "Sending Verification Link..."
-              : "Send Magic Link & OTP Code"}
-          </button>
-        </form>
-      ) : (
-        <form onSubmit={handleVerifyOtpCode} className="space-y-4">
-          {infoMessage && (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-3 text-xs leading-relaxed text-emerald-900">
-              <p className="font-bold">Verification Sent</p>
-              <p className="mt-0.5">{infoMessage}</p>
-            </div>
-          )}
-
-          <div>
-            <div className="flex items-center justify-between">
+      <div className="mt-6">
+        {!otpSentTo ? (
+          <form onSubmit={handleRequestOtp} className="space-y-4">
+            <div>
               <label
-                htmlFor="otp-token"
+                htmlFor="campus-email"
                 className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
               >
-                One-Time Code (Optional if clicking email link)
+                Institutional Email
               </label>
-              <button
-                type="button"
-                onClick={() => {
-                  setOtpSentTo(null);
-                  setOtpToken("");
-                  setFormError("");
-                  setInfoMessage("");
-                }}
-                className="text-xs font-semibold text-[#1E3A8A] hover:underline cursor-pointer"
+              <input
+                id="campus-email"
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="name@student.president.ac.id"
+                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm text-[#0F172A] placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+              />
+              <p className="mt-1.5 text-[11px] text-slate-500">
+                Students (<span className="font-mono">@student.president.ac.id</span>) and Staff / Advisors (<span className="font-mono">@president.ac.id</span>) sign in here.
+              </p>
+            </div>
+
+            {formError && (
+              <div
+                role="alert"
+                className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700"
               >
-                Change email
-              </button>
-            </div>
-            <input
-              id="otp-token"
-              type="text"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              value={otpToken}
-              onChange={(e) => setOtpToken(e.target.value)}
-              placeholder="Enter 6-digit code"
-              className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 font-mono text-sm tracking-widest text-[#0F172A] placeholder:tracking-normal placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-            />
-          </div>
+                {formError}
+              </div>
+            )}
 
-          {formError && (
-            <div
-              role="alert"
-              className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700"
+            <button
+              type="submit"
+              disabled={isOtpLoading}
+              className="w-full rounded-full bg-[#0F172A] px-5 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-60 cursor-pointer"
             >
-              {formError}
-            </div>
-          )}
+              {isOtpLoading
+                ? "Sending Verification Link..."
+                : "Send Magic Link & OTP Code"}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleVerifyOtpCode} className="space-y-4">
+            {infoMessage && (
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-3 text-xs leading-relaxed text-emerald-900">
+                <p className="font-bold">Verification Sent</p>
+                <p className="mt-0.5">{infoMessage}</p>
+              </div>
+            )}
 
-          <button
-            type="submit"
-            disabled={isVerifyLoading}
-            className="w-full rounded-full bg-[#0F172A] px-5 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-60 cursor-pointer"
-          >
-            {isVerifyLoading ? "Verifying Code..." : "Verify & Enter Workspace"}
-          </button>
-        </form>
-      )}
+            <div>
+              <div className="flex items-center justify-between">
+                <label
+                  htmlFor="otp-token"
+                  className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                >
+                  One-Time Code (Or click link in email)
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOtpSentTo(null);
+                    setOtpToken("");
+                    setFormError("");
+                    setInfoMessage("");
+                  }}
+                  className="text-xs font-semibold text-[#1E3A8A] hover:underline cursor-pointer"
+                >
+                  Change email
+                </button>
+              </div>
+              <input
+                id="otp-token"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={otpToken}
+                onChange={(e) => setOtpToken(e.target.value)}
+                placeholder="Enter verification code"
+                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 font-mono text-sm tracking-widest text-[#0F172A] placeholder:tracking-normal placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+              />
+            </div>
+
+            {formError && (
+              <div
+                role="alert"
+                className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700"
+              >
+                {formError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={isVerifyLoading}
+              className="w-full rounded-full bg-[#0F172A] px-5 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-60 cursor-pointer"
+            >
+              {isVerifyLoading
+                ? "Verifying Code..."
+                : "Verify & Enter Workspace"}
+            </button>
+          </form>
+        )}
+      </div>
 
       {/* Domain Security Notice */}
       <div className="mt-6 border-t border-[#E2E8F0] pt-4 text-center">

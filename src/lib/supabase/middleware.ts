@@ -2,6 +2,7 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import type { Database } from "./database.types";
 import { isAllowedInstitutionalEmail } from "../auth/domain";
+import { normalizeEnvValue, normalizeSupabaseUrl } from "./url";
 
 const PROTECTED_ROUTE_PREFIXES = [
   "/dashboard",
@@ -32,8 +33,10 @@ function copyCookies(source: NextResponse, target: NextResponse): NextResponse {
  */
 export async function updateSession(request: NextRequest): Promise<NextResponse> {
   const { pathname, search } = request.nextUrl;
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const supabaseUrl = normalizeSupabaseUrl(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const supabaseAnonKey = normalizeEnvValue(
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  );
 
   // Fail-closed for protected routes if Supabase credentials are not configured in production
   if (!supabaseUrl || !supabaseAnonKey) {
