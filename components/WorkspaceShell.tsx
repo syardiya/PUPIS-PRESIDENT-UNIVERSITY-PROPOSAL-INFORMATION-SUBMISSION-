@@ -12,6 +12,7 @@ export interface WorkspaceShellUser {
   role: UserRole;
   organization_unit: string | null;
   has_signature: boolean;
+  has_assigned_approvals?: boolean;
 }
 
 interface WorkspaceShellProps {
@@ -191,7 +192,12 @@ export default function WorkspaceShell({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [mobileMenuOpen]);
 
-  const visibleNavItems = NAV_ITEMS.filter((item) => item.visible(user.role));
+  const visibleNavItems = NAV_ITEMS.filter((item) => {
+    if (item.href === "/approvals" && user.has_assigned_approvals) {
+      return true;
+    }
+    return item.visible(user.role);
+  });
   const roleBadge = getRoleBadgeMeta(user.role);
 
   const initials = user.full_name

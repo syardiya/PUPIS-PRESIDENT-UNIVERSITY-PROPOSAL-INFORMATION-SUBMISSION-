@@ -39,11 +39,18 @@ async function AuthenticatedWorkspaceContainer({
   }
 
   const supabase = await createClient();
-  const { count: unreadCount } = await supabase
-    .from("notifications")
-    .select("id", { count: "exact", head: true })
-    .eq("user_id", profile.id)
-    .eq("is_read", false);
+  const [{ count: unreadCount }, { count: assignedApprovalsCount }] =
+    await Promise.all([
+      supabase
+        .from("notifications")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", profile.id)
+        .eq("is_read", false),
+      supabase
+        .from("proposal_signers")
+        .select("id", { count: "exact", head: true })
+        .eq("approver_id", profile.id),
+    ]);
 
   return (
     <WorkspaceShell
@@ -54,6 +61,7 @@ async function AuthenticatedWorkspaceContainer({
         role: profile.role,
         organization_unit: profile.organization_unit,
         has_signature: Boolean(profile.signature_storage_path),
+        has_assigned_approvals: (assignedApprovalsCount ?? 0) > 0,
       }}
       unreadNotificationsCount={unreadCount ?? 0}
     >

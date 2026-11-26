@@ -199,6 +199,9 @@ export interface Database {
           signature_storage_path: string | null;
           signed_on_version: number | null;
           signed_at: string | null;
+          decision_note: string | null;
+          decided_at: string | null;
+          verification_code: string | null;
         };
         Insert: {
           id?: string;
@@ -211,6 +214,9 @@ export interface Database {
           signature_storage_path?: string | null;
           signed_on_version?: number | null;
           signed_at?: string | null;
+          decision_note?: string | null;
+          decided_at?: string | null;
+          verification_code?: string | null;
         };
         Update: {
           id?: string;
@@ -223,6 +229,9 @@ export interface Database {
           signature_storage_path?: string | null;
           signed_on_version?: number | null;
           signed_at?: string | null;
+          decision_note?: string | null;
+          decided_at?: string | null;
+          verification_code?: string | null;
         };
         Relationships: [
           {
@@ -328,6 +337,8 @@ export interface Database {
           from_version: number | null;
           to_version: number;
           action_type: RevisionActionTypeDb;
+          step_order: number | null;
+          role_title: string | null;
           note: string | null;
           created_at: string;
         };
@@ -338,6 +349,8 @@ export interface Database {
           from_version?: number | null;
           to_version: number;
           action_type: RevisionActionTypeDb;
+          step_order?: number | null;
+          role_title?: string | null;
           note?: string | null;
           created_at?: string;
         };
@@ -415,6 +428,14 @@ export interface Database {
       };
       is_proposal_signer: {
         Args: { p_proposal_id: string; p_user_id?: string };
+        Returns: boolean;
+      };
+      is_active_turn_signer: {
+        Args: {
+          p_proposal_id: string;
+          p_step_order: number;
+          p_user_id?: string;
+        };
         Returns: boolean;
       };
       can_view_proposal: {
