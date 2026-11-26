@@ -33,4 +33,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Build Next.js application
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key-for-ci-build
         run: npm run build
