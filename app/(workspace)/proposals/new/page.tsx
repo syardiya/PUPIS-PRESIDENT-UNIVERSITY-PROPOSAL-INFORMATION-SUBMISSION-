@@ -1,31 +1,33 @@
 import React, { Suspense } from "react";
 import { requireAuth } from "@/src/lib/auth/guard";
-import ProposalWizardClientWrapper from "@/components/ProposalWizardClientWrapper";
-import type { CampusAccount } from "@/components/types";
+import { createClient } from "@/src/lib/supabase/server";
+import ProposalCreationWizard from "@/components/ProposalCreationWizard";
 
 async function NewProposalLoader() {
   const profile = await requireAuth();
+  const supabase = await createClient();
 
-  const mappedAccount: CampusAccount = {
-    id:
-      profile.role === "staff"
-        ? "approver"
-        : profile.role === "admin"
-        ? "approver"
-        : "submitter",
-    name: profile.full_name,
-    roleTitle:
-      profile.role === "admin"
-        ? "Administrator"
-        : profile.role === "staff"
-        ? "Approver / Staff"
-        : "Student Submitter",
-    email: profile.email,
-    badgeText: profile.organization_unit ?? "President University",
-    description: "Authenticated campus proposal session",
-  };
+  const { data: directoryUsers } = await supabase
+    .from("users")
+    .select("id, email, full_name, organization_unit, role")
+    .order("role", { ascending: true })
+    .order("full_name", { ascending: true })
+    .limit(50);
 
-  return <ProposalWizardClientWrapper account={mappedAccount} />;
+  return (
+    <ProposalCreationWizard
+      currentUser={{
+        id: profile.id,
+        email: profile.email,
+        full_name: profile.full_name,
+        organization_unit: profile.organization_unit,
+        role: profile.role,
+        has_signature: Boolean(profile.signature_storage_path),
+      }}
+      initialProposal={null}
+      initialDirectoryUsers={directoryUsers ?? []}
+    />
+  );
 }
 
 export default function NewProposalPage() {
@@ -33,7 +35,7 @@ export default function NewProposalPage() {
     <Suspense
       fallback={
         <div className="p-8 text-center text-xs font-medium text-slate-500">
-          Loading proposal wizard...
+          Initializing proposal creation wizard...
         </div>
       }
     >
