@@ -1,5 +1,9 @@
 import "server-only";
 
+import {
+  SIGNATURES_BUCKET,
+  SIGNED_URL_TTL_SECONDS,
+} from "../auth/guard";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
   BudgetLineItemDb,
@@ -400,7 +404,9 @@ export async function fetchHydratedProposalDetail(
 ) {
   const { data: proposal, error: propError } = await supabase
     .from("proposals")
-    .select("*")
+    .select(
+      "*, submitter:submitter_id(id, email, full_name, organization_unit, role)"
+    )
     .eq("id", proposalId)
     .maybeSingle();
 
@@ -417,7 +423,7 @@ export async function fetchHydratedProposalDetail(
     supabase
       .from("proposal_signers")
       .select(
-        "id, proposal_id, approver_id, role_title, step_order, status, signature_type, signature_storage_path, signed_on_version, signed_at, users:approver_id(id, email, full_name, organization_unit, role)"
+        "*, users:approver_id(id, email, full_name, organization_unit, role)"
       )
       .eq("proposal_id", proposalId)
       .order("step_order", { ascending: true }),
@@ -436,32 +442,68 @@ export async function fetchHydratedProposalDetail(
     supabase
       .from("revision_logs")
       .select(
-        "id, proposal_id, actor_id, from_version, to_version, action_type, note, created_at, users:actor_id(id, email, full_name, role)"
+        "*, users:actor_id(id, email, full_name, organization_unit, role)"
       )
       .eq("proposal_id", proposalId)
       .order("created_at", { ascending: true }),
   ]);
 
-  const attachmentsWithUrls = await Promise.all(
-    (attachments ?? []).map(async (att) => {
-      const { data: signed } = await supabase.storage
-        .from(PROPOSAL_ATTACHMENTS_BUCKET)
-        .createSignedUrl(att.storage_path, ATTACHMENT_SIGNED_URL_TTL_SECONDS);
+  const signerList = signers ?? [];
+  const pendingOrders = signerList
+    .filter((s) => s.status === "pending")
+    .map((s) => s.step_order)
+    .sort((a, b) => a - b);
+  const lowestPendingStepOrder =
+    proposal.status === "pending_ttd" && pendingOrders.length > 0
+      ? pendingOrders[0]
+      : null;
 
-      return {
-        ...att,
-        signed_url: signed?.signedUrl ?? null,
-      };
-    })
-  );
+  const [attachmentsWithUrls, signersWithUrls] = await Promise.all([
+    Promise.all(
+      (attachments ?? []).map(async (att) => {
+        const { data: signed } = await supabase.storage
+          .from(PROPOSAL_ATTACHMENTS_BUCKET)
+          .createSignedUrl(att.storage_path, ATTACHMENT_SIGNED_URL_TTL_SECONDS);
+
+        return {
+          ...att,
+          signed_url: signed?.signedUrl ?? null,
+        };
+      })
+    ),
+    Promise.all(
+      signerList.map(async (s) => {
+        let signatureSignedUrl: string | null = null;
+        if (s.status === "signed" && s.signature_storage_path) {
+          const { data: sigUrlData } = await supabase.storage
+            .from(SIGNATURES_BUCKET)
+            .createSignedUrl(s.signature_storage_path, SIGNED_URL_TTL_SECONDS);
+          signatureSignedUrl = sigUrlData?.signedUrl ?? null;
+        }
+
+        return {
+          ...s,
+          approver: Array.isArray(s.users) ? s.users[0] ?? null : s.users ?? null,
+          is_active_turn:
+            lowestPendingStepOrder !== null &&
+            s.status === "pending" &&
+            s.step_order === lowestPendingStepOrder,
+          signature_signed_url: signatureSignedUrl,
+        };
+      })
+    ),
+  ]);
+
+  const submitterUser = Array.isArray(proposal.submitter)
+    ? proposal.submitter[0] ?? null
+    : proposal.submitter ?? null;
 
   return {
     ...proposal,
+    submitter: submitterUser,
+    active_step_order: lowestPendingStepOrder,
     budget_items: parseBudgetItemsFromJson(proposal.budget_items),
-    signers: (signers ?? []).map((s) => ({
-      ...s,
-      approver: Array.isArray(s.users) ? s.users[0] ?? null : s.users ?? null,
-    })),
+    signers: signersWithUrls,
     cc_users: (ccRows ?? []).map((c) => ({
       ...c,
       stakeholder: Array.isArray(c.users) ? c.users[0] ?? null : c.users ?? null,
