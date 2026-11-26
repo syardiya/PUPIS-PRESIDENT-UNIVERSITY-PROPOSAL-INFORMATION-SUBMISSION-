@@ -17,3 +17,53 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
 }
+
+.print-only {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .workspace-main-column {
+    padding-left: 0 !important;
+  }
+
+  .print-sheet-container {
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+
+  .print-stack-grid {
+    display: block !important;
+  }
+
+  .print-stack-grid > * + * {
+    margin-top: 1rem !important;
+  }
+
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
+

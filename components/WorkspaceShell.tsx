@@ -4,6 +4,9 @@ import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { UserRole } from "@/src/lib/supabase/database.types";
+import NotificationBellPopover, {
+  type WorkspaceNotificationItem,
+} from "./NotificationBellPopover";
 
 export interface WorkspaceShellUser {
   id: string;
@@ -18,6 +21,7 @@ export interface WorkspaceShellUser {
 interface WorkspaceShellProps {
   user: WorkspaceShellUser;
   unreadNotificationsCount: number;
+  initialNotifications?: WorkspaceNotificationItem[];
   children: React.ReactNode;
 }
 
@@ -131,8 +135,8 @@ const NAV_ITEMS: NavItem[] = [
   },
   {
     href: "/admin",
-    label: "Admin Panel",
-    visible: (role) => role === "admin",
+    label: "Governance & Admin",
+    visible: (role) => role === "staff" || role === "admin",
     icon: (
       <svg
         className="h-4 w-4 shrink-0"
@@ -175,6 +179,7 @@ function getRoleBadgeMeta(role: UserRole): { label: string; classes: string } {
 export default function WorkspaceShell({
   user,
   unreadNotificationsCount,
+  initialNotifications = [],
   children,
 }: WorkspaceShellProps) {
   const pathname = usePathname();
@@ -219,7 +224,7 @@ export default function WorkspaceShell({
       {/* Desktop Sidebar */}
       <aside
         aria-label="Primary Workspace Navigation"
-        className="hidden lg:fixed lg:inset-y-0 lg:z-30 lg:flex lg:w-68 lg:flex-col lg:border-r lg:border-[#E2E8F0] lg:bg-white"
+        className="no-print hidden lg:fixed lg:inset-y-0 lg:z-30 lg:flex lg:w-68 lg:flex-col lg:border-r lg:border-[#E2E8F0] lg:bg-white"
       >
         {/* Brand Header */}
         <div className="flex h-16 items-center justify-between border-b border-[#E2E8F0] px-5">
@@ -318,7 +323,7 @@ export default function WorkspaceShell({
       {/* Mobile Off-Canvas Drawer */}
       {mobileMenuOpen && (
         <div
-          className="fixed inset-0 z-50 flex lg:hidden"
+          className="no-print fixed inset-0 z-50 flex lg:hidden"
           role="dialog"
           aria-modal="true"
           aria-label="Mobile Navigation Menu"
@@ -424,9 +429,9 @@ export default function WorkspaceShell({
       )}
 
       {/* Main Content Column */}
-      <div className="flex min-w-0 flex-1 flex-col lg:pl-68">
+      <div className="workspace-main-column flex min-w-0 flex-1 flex-col lg:pl-68">
         {/* Top Workspace Header */}
-        <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-4 border-b border-[#E2E8F0] bg-white/95 px-4 backdrop-blur-md sm:px-6 lg:px-8">
+        <header className="no-print sticky top-0 z-20 flex h-16 items-center justify-between gap-4 border-b border-[#E2E8F0] bg-white/95 px-4 backdrop-blur-md sm:px-6 lg:px-8">
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -463,38 +468,13 @@ export default function WorkspaceShell({
             </div>
           </div>
 
-          {/* Right Actions: Unread Notifications Badge + New Proposal CTA */}
+          {/* Right Actions: Interactive Notifications Popover + New Proposal CTA */}
           <div className="flex items-center gap-3">
-            {/* Unread Notifications Counter Badge */}
-            <Link
-              href="/dashboard#notifications"
-              aria-label={`Notifications (${unreadNotificationsCount} unread)`}
-              className="relative inline-flex items-center gap-2 rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-1.5 text-xs font-semibold text-[#0F172A] transition hover:border-slate-300 hover:bg-white focus-visible:ring-2 focus-visible:ring-[#1E3A8A] focus-visible:outline-none"
-            >
-              <svg
-                className="h-4 w-4 text-slate-600"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
-                />
-              </svg>
-              <span className="hidden sm:inline">Notifications</span>
-              <span
-                className={`inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-bold ${
-                  unreadNotificationsCount > 0
-                    ? "bg-[#1E3A8A] text-white"
-                    : "bg-slate-200 text-slate-700"
-                }`}
-              >
-                {unreadNotificationsCount}
-              </span>
-            </Link>
+            <NotificationBellPopover
+              key={`${unreadNotificationsCount}-${initialNotifications[0]?.id ?? "empty"}`}
+              initialUnreadCount={unreadNotificationsCount}
+              initialNotifications={initialNotifications}
+            />
 
             {(user.role === "student" || user.role === "admin") && (
               <Link

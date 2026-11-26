@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PUPIS — President University Proposal Information Submission
 
-## Getting Started
+Production web platform for **President University** student organizations, faculty advisors, and Student Affairs to draft, review, digitally sign (Sequential Digital TTD), revise (`v1 -> v2`), and archive activity proposals with end-to-end Row Level Security (RLS) and immutable audit logging.
 
-First, run the development server:
+## Tech Stack
+- **Framework**: Next.js 16 App Router (`cacheComponents: true`, `proxy.ts`, React 19, TypeScript strict mode)
+- **Styling & Print**: Tailwind CSS v4 + native `@media print` A4 Proposal & TTD Verification Sheet
+- **Validation**: Zod v4 (`.strict()` server-side input validation)
+- **Backend & Security**: Supabase Auth (`@student.president.ac.id` & `@president.ac.id` domain whitelist), PostgreSQL + RLS, Private Supabase Storage (`proposal-documents`, `proposal-attachments`, `user-signatures`) served via short-lived Signed URLs
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+---
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Local Development
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Install dependencies (Node.js 22 LTS recommended, see `.nvmrc`):
+   ```bash
+   npm ci
+   ```
+2. Apply Supabase SQL migrations in order inside the Supabase SQL Editor (or via Supabase CLI):
+   1. `supabase/migrations/001_initial_pupis_schema.sql`
+   2. `supabase/migrations/002_user_profile_signature.sql`
+   3. `supabase/migrations/003_proposal_wizard_refinements.sql`
+   4. `supabase/migrations/004_approval_workflow_and_audit.sql`
+3. Configure `.env.local` (see `.env.example` / environment variable table below) and start the dev server:
+   ```bash
+   npm run dev
+   ```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+---
 
-## Learn More
+## Deploying on Render (Node Web Service) + Supabase Checklist
 
-To learn more about Next.js, take a look at the following resources:
+### 1. Render Web Service Settings
+- **Service Type**: Web Service (Node)
+- **Node Version**: Node `22` (detected automatically from `.nvmrc` / `package.json` `engines`)
+- **Build Command**:
+  ```bash
+  npm ci && npm run build
+  ```
+- **Start Command**:
+  ```bash
+  npm run start
+  ```
+  *(Render automatically injects `PORT`; `next start` binds to `0.0.0.0:$PORT` natively. If deploying via `Dockerfile` instead, `NEXT_OUTPUT_STANDALONE=true` is enabled automatically inside the image builder.)*
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 2. Required Render Environment Variables
+Configure these in **Render Dashboard → Service → Environment**:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+| Variable | Visibility | Example / Value |
+| :--- | :--- | :--- |
+| `NODE_ENV` | Server | `production` |
+| `NEXT_PUBLIC_SUPABASE_URL` | Public (Build + Runtime) | `https://<project-ref>.supabase.co` |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public (Build + Runtime) | `<supabase-anon-public-key>` |
+| `SUPABASE_SERVICE_ROLE_KEY` | **Secret (Server-Only)** | `<supabase-service-role-secret-key>` *(Never prefix with `NEXT_PUBLIC_`)* |
+| `NEXT_PUBLIC_APP_URL` | Public (Build + Runtime) | `https://<your-service>.onrender.com` *(or custom domain)* |
+| `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAINS` | Public (Build + Runtime) | `student.president.ac.id,president.ac.id` |
 
-## Deploy on Vercel
+> **Note**: Because `NEXT_PUBLIC_*` variables are inlined during `next build`, trigger a **Clear build cache & deploy** on Render if you change any `NEXT_PUBLIC_*` value later.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### 3. Supabase Auth URL & Redirect Configuration
+In **Supabase Dashboard → Authentication → URL Configuration**:
+1. **Site URL**:
+   - Set to `https://<your-service>.onrender.com` (or your custom published domain, e.g. `https://pupis.president.ac.id`).
+2. **Redirect URLs** (Allowlist):
+   - `https://<your-service>.onrender.com/auth/callback`
+   - `https://<your-custom-domain>/auth/callback` *(if using a custom domain on Render)*
+   - `http://localhost:3000/auth/callback` *(for local development)*
+3. **Google OAuth Provider** *(if enabled in Supabase Auth → Providers → Google)*:
+   - Ensure Google Cloud Console Authorized Redirect URI points to `https://<project-ref>.supabase.co/auth/v1/callback`.

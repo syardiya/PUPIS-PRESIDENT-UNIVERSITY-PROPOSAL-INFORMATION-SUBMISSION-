@@ -10,6 +10,7 @@ import type {
 import { uuidSchema } from "@/src/lib/validations/proposal";
 import { fetchHydratedProposalDetail } from "@/src/lib/proposals/server-helpers";
 import ReviewerDecisionPanel from "@/components/ReviewerDecisionPanel";
+import PrintProposalButton from "@/components/PrintProposalButton";
 
 function getStatusBadge(status: ProposalStatusDb) {
   switch (status) {
@@ -181,9 +182,57 @@ async function ProposalDetailSection({
       : null;
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
+    <div className="print-sheet-container mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
+      {/* Official Print-Only Institutional Letterhead */}
+      <div className="print-only rounded-2xl border-2 border-[#0F172A] bg-white p-5">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-300 pb-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#0F172A] text-sm font-bold tracking-wider text-white">
+              PU
+            </div>
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-[#1E3A8A]">
+                President University • Student Affairs &amp; Governance
+              </p>
+              <h2 className="text-base font-bold text-[#0F172A]">
+                Official Proposal Summary &amp; Digital TTD Approval Sheet
+              </h2>
+            </div>
+          </div>
+
+          <div className="text-right font-mono text-[11px] text-slate-700">
+            <p className="font-bold text-[#0F172A]">{detail.proposal_code}</p>
+            <p>
+              Version v{detail.current_version}.0 • {badge.label}
+            </p>
+            <p>Updated: {formatDateTime(detail.updated_at)}</p>
+          </div>
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-700">
+          <p>
+            <strong className="text-[#0F172A]">Organization:</strong>{" "}
+            {detail.organization_name || "—"}
+          </p>
+          <p>
+            <strong className="text-[#0F172A]">Person in Charge (PIC):</strong>{" "}
+            {detail.person_in_charge || "—"}
+          </p>
+          <p>
+            <strong className="text-[#0F172A]">Submitter:</strong>{" "}
+            {detail.submitter
+              ? `${detail.submitter.full_name} (${detail.submitter.email})`
+              : "—"}
+          </p>
+          <p>
+            <strong className="text-[#0F172A]">Category:</strong>{" "}
+            {detail.activity_type || "General Campus Activity"}
+          </p>
+        </div>
+      </div>
+
       {query.submitted === "1" && (
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-xs font-semibold text-emerald-900">
+        <div className="no-print rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-4 text-xs font-semibold text-emerald-900">
           Proposal <span className="font-mono">{detail.proposal_code}</span> (v
           {detail.current_version}.0) has been locked and routed to Step{" "}
           {detail.active_step_order ?? 1} for sequential TTD approval.
@@ -192,7 +241,7 @@ async function ProposalDetailSection({
 
       {/* Highlighted Revision Requested Banner */}
       {detail.status === "needs_revision" && latestRevisionRequest && (
-        <div className="rounded-2xl border border-amber-300 bg-gradient-to-r from-amber-50 via-rose-50/40 to-amber-50 p-5">
+        <div className="print-avoid-break rounded-2xl border border-amber-300 bg-gradient-to-r from-amber-50 via-rose-50/40 to-amber-50 p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <span className="text-xs font-bold uppercase tracking-wider text-amber-900">
               Revision Requested by{" "}
@@ -211,7 +260,7 @@ async function ProposalDetailSection({
             &ldquo;{latestRevisionRequest.note}&rdquo;
           </blockquote>
           {canEdit && (
-            <div className="mt-3 flex justify-end">
+            <div className="no-print mt-3 flex justify-end">
               <Link
                 href={`/proposals/${detail.id}/edit`}
                 className="rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white hover:bg-[#1E3A8A]"
@@ -226,7 +275,7 @@ async function ProposalDetailSection({
 
       {/* Highlighted Rejected Banner */}
       {detail.status === "rejected" && latestRejectionEntry && (
-        <div className="rounded-2xl border border-rose-300 bg-rose-50 p-5">
+        <div className="print-avoid-break rounded-2xl border border-rose-300 bg-rose-50 p-5">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs font-bold uppercase tracking-wider text-rose-900">
               Proposal Rejected by{" "}
@@ -244,24 +293,26 @@ async function ProposalDetailSection({
 
       {/* Active Turn Reviewer Decision Panel */}
       {isCurrentUserActiveSigner && activeTurnSigner && (
-        <ReviewerDecisionPanel
-          proposalId={detail.id}
-          proposalCode={detail.proposal_code}
-          proposalTitle={detail.title}
-          currentVersion={detail.current_version}
-          stepOrder={activeTurnSigner.step_order}
-          totalSteps={detail.signers.length}
-          roleTitle={activeTurnSigner.role_title}
-          approverName={profile.full_name}
-          approverEmail={profile.email}
-          hasSavedSignature={Boolean(profile.signature_storage_path)}
-          savedSignaturePreviewUrl={profile.signature_url}
-        />
+        <div className="no-print">
+          <ReviewerDecisionPanel
+            proposalId={detail.id}
+            proposalCode={detail.proposal_code}
+            proposalTitle={detail.title}
+            currentVersion={detail.current_version}
+            stepOrder={activeTurnSigner.step_order}
+            totalSteps={detail.signers.length}
+            roleTitle={activeTurnSigner.role_title}
+            approverName={profile.full_name}
+            approverEmail={profile.email}
+            hasSavedSignature={Boolean(profile.signature_storage_path)}
+            savedSignaturePreviewUrl={profile.signature_url}
+          />
+        </div>
       )}
 
       {/* Upcoming Signer Informational Banner */}
       {upcomingUserSigner && activeTurnSigner && (
-        <div className="rounded-2xl border border-[#E2E8F0] bg-white px-5 py-4 text-xs text-slate-700 shadow-2xs">
+        <div className="no-print rounded-2xl border border-[#E2E8F0] bg-white px-5 py-4 text-xs text-slate-700 shadow-2xs">
           <strong className="text-[#0F172A]">
             Sequential Queue Notice (Step {upcomingUserSigner.step_order} —{" "}
             {upcomingUserSigner.role_title}):
@@ -275,7 +326,7 @@ async function ProposalDetailSection({
       )}
 
       {/* Top Proposal Metadata Header Card */}
-      <div className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs">
+      <div className="print-avoid-break rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs">
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#E2E8F0] pb-5">
           <div>
             <div className="flex flex-wrap items-center gap-2">
@@ -309,7 +360,8 @@ async function ProposalDetailSection({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="no-print flex flex-wrap items-center gap-2.5">
+            <PrintProposalButton />
             <Link
               href="/proposals"
               className="rounded-full border border-[#E2E8F0] bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
@@ -359,7 +411,7 @@ async function ProposalDetailSection({
       </div>
 
       {/* Main Content Grid */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+      <div className="print-stack-grid grid grid-cols-1 gap-6 lg:grid-cols-12">
         {/* LEFT (7 cols): Narrative, RAB Table & Supporting Attachments */}
         <div className="lg:col-span-7 space-y-6">
           <section className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs">
@@ -484,7 +536,7 @@ async function ProposalDetailSection({
                         href={att.signed_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="shrink-0 rounded-full border border-[#E2E8F0] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#1E3A8A] hover:bg-slate-50"
+                        className="no-print shrink-0 rounded-full border border-[#E2E8F0] bg-white px-3.5 py-1.5 text-xs font-semibold text-[#1E3A8A] hover:bg-slate-50"
                       >
                         Download / View
                       </a>
@@ -748,6 +800,109 @@ async function ProposalDetailSection({
           </section>
         </div>
       </div>
+
+      {/* Formal Printable Official Approval & Signature Verification Sheet */}
+      {detail.signers.length > 0 && (
+        <section className="print-avoid-break rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-4">
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-[#1E3A8A]">
+                Official Digital Verification Sheet
+              </span>
+              <h2 className="text-base font-bold text-[#0F172A]">
+                Sequential TTD Sign-Off &amp; Verification Record (
+                {detail.proposal_code} • v{detail.current_version}.0)
+              </h2>
+            </div>
+            <span className="font-mono text-xs font-semibold text-slate-600">
+              {detail.signers.filter((s) => s.status === "signed").length} of{" "}
+              {detail.signers.length} Signatures Verified
+            </span>
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {detail.signers.map((signer) => {
+              const isSigned = signer.status === "signed";
+              return (
+                <div
+                  key={`sheet-${signer.id}`}
+                  className={`print-avoid-break flex flex-col justify-between rounded-2xl border p-4 ${
+                    isSigned
+                      ? "border-emerald-200 bg-emerald-50/15"
+                      : "border-[#E2E8F0] bg-[#F8FAFC]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-200/80 pb-2.5">
+                    <span className="text-xs font-bold text-[#0F172A]">
+                      Step {signer.step_order} • {signer.role_title}
+                    </span>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
+                        isSigned
+                          ? "bg-emerald-100 text-emerald-800"
+                          : signer.status === "rejected"
+                          ? "bg-rose-100 text-rose-800"
+                          : signer.status === "revision_requested"
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-slate-200 text-slate-700"
+                      }`}
+                    >
+                      {isSigned ? "Verified" : signer.status.replace("_", " ")}
+                    </span>
+                  </div>
+
+                  {/* Signature Graphic Area */}
+                  <div className="my-3 flex h-20 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-3 py-2">
+                    {isSigned ? (
+                      signer.signature_type !== "stamp" &&
+                      signer.signature_signed_url ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={signer.signature_signed_url}
+                          alt={`Digital signature of ${
+                            signer.approver?.full_name ?? "Approver"
+                          }`}
+                          className="max-h-16 max-w-full object-contain"
+                        />
+                      ) : (
+                        <div className="text-center">
+                          <span className="inline-block rounded-full bg-[#0F172A] px-2.5 py-0.5 text-[10px] font-bold tracking-wider text-white">
+                            PRESIDENT UNIVERSITY
+                          </span>
+                          <p className="mt-1 text-[11px] font-bold text-emerald-800">
+                            ✓ Official Institutional Stamp
+                          </p>
+                        </div>
+                      )
+                    ) : (
+                      <span className="text-[11px] font-medium text-slate-400">
+                        Awaiting Digital TTD
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="border-t border-slate-200/80 pt-2.5 text-xs">
+                    <p className="truncate font-bold text-[#0F172A]">
+                      {signer.approver?.full_name ?? "Assigned Approver"}
+                    </p>
+                    <p className="truncate font-mono text-[10px] text-slate-500">
+                      {signer.approver?.email ?? "—"}
+                    </p>
+                    <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1 font-mono text-[10px] text-slate-600">
+                      <span className="font-semibold text-[#1E3A8A]">
+                        {signer.verification_code ?? "Pending Verification Code"}
+                      </span>
+                      <span>
+                        {isSigned ? formatDateTime(signer.signed_at) : "—"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

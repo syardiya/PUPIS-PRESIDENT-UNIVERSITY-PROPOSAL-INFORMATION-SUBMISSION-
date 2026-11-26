@@ -13,7 +13,7 @@ function getStatusBadge(status: ProposalStatusDb) {
       };
     case "needs_revision":
       return {
-        label: "Needs Revision",
+        label: "Revision Requested",
         classes: "bg-amber-50 text-amber-800 border-amber-200",
       };
     case "rejected":
@@ -29,7 +29,7 @@ function getStatusBadge(status: ProposalStatusDb) {
     case "pending_ttd":
     default:
       return {
-        label: "Pending TTD",
+        label: "In Review (Pending TTD)",
         classes: "bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/25",
       };
   }
@@ -40,33 +40,62 @@ function formatIdr(amount: number): string {
     style: "currency",
     currency: "IDR",
     maximumFractionDigits: 0,
-  }).format(amount);
+  }).format(Number.isFinite(amount) ? amount : 0);
 }
 
 async function DashboardDataSection() {
   const profile = await requireAuth();
   const supabase = await createClient();
 
-  const [{ data: proposals }, { data: notifications }] = await Promise.all([
-    supabase
-      .from("proposals")
-      .select(
-        "id, proposal_code, title, organization_name, event_date, total_budget, status, current_version, updated_at"
-      )
-      .order("updated_at", { ascending: false })
-      .limit(10),
-    supabase
-      .from("notifications")
-      .select("id, title, message, is_read, created_at")
-      .eq("user_id", profile.id)
-      .order("created_at", { ascending: false })
-      .limit(5),
-  ]);
+  const [{ data: allVisibleProposals }, { data: notifications }] =
+    await Promise.all([
+      supabase
+        .from("proposals")
+        .select(
+          "id, proposal_code, title, activity_type, organization_name, event_date, total_budget, status, current_version, updated_at"
+        )
+        .order("updated_at", { ascending: false }),
+      supabase
+        .from("notifications")
+        .select("id, proposal_id, title, message, is_read, created_at")
+        .eq("user_id", profile.id)
+        .order("created_at", { ascending: false })
+        .limit(6),
+    ]);
 
-  const list = proposals ?? [];
-  const pendingCount = list.filter((p) => p.status === "pending_ttd").length;
-  const revisionCount = list.filter((p) => p.status === "needs_revision").length;
-  const approvedCount = list.filter((p) => p.status === "approved").length;
+  const allProposals = allVisibleProposals ?? [];
+  const recentList = allProposals.slice(0, 8);
+
+  const pendingCount = allProposals.filter(
+    (p) => p.status === "pending_ttd"
+  ).length;
+  const revisionCount = allProposals.filter(
+    (p) => p.status === "needs_revision"
+  ).length;
+  const approvedProposals = allProposals.filter((p) => p.status === "approved");
+  const approvedBudgetTotal = approvedProposals.reduce(
+    (sum, p) => sum + Number(p.total_budget || 0),
+    0
+  );
+
+  // Category analytics summary for Student Affairs / Admins
+  const categoryStatsMap = new Map<
+    string,
+    { count: number; totalBudget: number }
+  >();
+  for (const prop of allProposals) {
+    if (prop.status === "draft") continue;
+    const key = prop.activity_type || "Uncategorized";
+    const prev = categoryStatsMap.get(key) ?? { count: 0, totalBudget: 0 };
+    categoryStatsMap.set(key, {
+      count: prev.count + 1,
+      totalBudget: prev.totalBudget + Number(prop.total_budget || 0),
+    });
+  }
+  const categoryBreakdown = Array.from(categoryStatsMap.entries())
+    .map(([category, meta]) => ({ category, ...meta }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 5);
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
@@ -80,8 +109,8 @@ async function DashboardDataSection() {
             Welcome back, {profile.full_name}
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            Monitor active proposal submissions, sequential digital TTD
-            progress, and campus notifications.
+            Monitor proposal activity, sequential digital TTD progress, budget
+            allocations, and campus notifications.
           </p>
         </div>
 
@@ -96,12 +125,20 @@ async function DashboardDataSection() {
           )}
 
           {isApproverOrAdminRole(profile.role) && (
-            <Link
-              href="/approvals"
-              className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A]"
-            >
-              <span>Open Approval Queue</span>
-            </Link>
+            <>
+              <Link
+                href="/admin"
+                className="inline-flex items-center gap-2 rounded-full border border-[#E2E8F0] bg-white px-4 py-2 text-xs font-semibold text-[#0F172A] shadow-2xs transition hover:bg-slate-50"
+              >
+                <span>Analytics &amp; Explorer</span>
+              </Link>
+              <Link
+                href="/approvals"
+                className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A]"
+              >
+                <span>Open Approval Queue</span>
+              </Link>
+            </>
           )}
         </div>
       </div>
@@ -112,36 +149,94 @@ async function DashboardDataSection() {
           <span className="text-xs font-semibold text-slate-500">
             Visible Proposals
           </span>
-          <p className="mt-2 text-3xl font-bold text-[#0F172A]">{list.length}</p>
+          <p className="mt-2 text-3xl font-bold text-[#0F172A]">
+            {allProposals.length}
+          </p>
+          <p className="mt-1 text-[11px] text-slate-400">
+            Scoped by PostgreSQL RLS
+          </p>
         </div>
 
         <div className="rounded-2xl border border-[#E2E8F0] bg-white p-5 shadow-2xs">
           <span className="text-xs font-semibold text-slate-500">
-            Pending Digital TTD
+            In Review (Pending TTD)
           </span>
           <p className="mt-2 text-3xl font-bold text-[#1E3A8A]">
             {pendingCount}
           </p>
+          <p className="mt-1 text-[11px] text-slate-400">
+            Active sequential routing
+          </p>
         </div>
 
         <div className="rounded-2xl border border-[#E2E8F0] bg-white p-5 shadow-2xs">
           <span className="text-xs font-semibold text-slate-500">
-            Needs Revision
+            Revision Requested
           </span>
           <p className="mt-2 text-3xl font-bold text-amber-600">
             {revisionCount}
           </p>
+          <p className="mt-1 text-[11px] text-slate-400">
+            Awaiting submitter update
+          </p>
         </div>
 
         <div className="rounded-2xl border border-[#E2E8F0] bg-white p-5 shadow-2xs">
           <span className="text-xs font-semibold text-slate-500">
-            Approved Proposals
+            Approved ({approvedProposals.length})
           </span>
-          <p className="mt-2 text-3xl font-bold text-emerald-700">
-            {approvedCount}
+          <p className="mt-2 truncate text-xl font-bold text-emerald-700 sm:text-2xl">
+            {formatIdr(approvedBudgetTotal)}
+          </p>
+          <p className="mt-1 text-[11px] text-slate-400">
+            Total approved budget
           </p>
         </div>
       </div>
+
+      {/* Category Breakdown Strip for Staff & Admins */}
+      {isApproverOrAdminRole(profile.role) && categoryBreakdown.length > 0 && (
+        <section className="mt-6 rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E2E8F0] pb-3.5">
+            <div>
+              <h2 className="text-sm font-bold text-[#0F172A]">
+                Submitted Proposals by Activity Category
+              </h2>
+              <p className="text-xs text-slate-500">
+                Volume and requested budget across campus activity types
+              </p>
+            </div>
+            <Link
+              href="/archive"
+              className="text-xs font-semibold text-[#1E3A8A] hover:underline"
+            >
+              Open Decided Archive →
+            </Link>
+          </div>
+
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            {categoryBreakdown.map((item) => (
+              <div
+                key={item.category}
+                className="rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-3.5"
+              >
+                <p className="truncate text-xs font-bold text-[#0F172A]">
+                  {item.category}
+                </p>
+                <p className="mt-1 text-lg font-bold text-[#1E3A8A]">
+                  {item.count}{" "}
+                  <span className="text-xs font-normal text-slate-500">
+                    proposal(s)
+                  </span>
+                </p>
+                <p className="mt-0.5 font-mono text-[11px] text-slate-600">
+                  {formatIdr(item.totalBudget)}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Two-Column Recent Proposals & Notifications */}
       <div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-12">
@@ -152,7 +247,8 @@ async function DashboardDataSection() {
                 Recent Proposals
               </h2>
               <p className="text-xs text-slate-500">
-                Scoped automatically by PostgreSQL Row-Level Security
+                Click any proposal to inspect details, TTD chain, or printable
+                approval sheet
               </p>
             </div>
             <Link
@@ -163,7 +259,7 @@ async function DashboardDataSection() {
             </Link>
           </div>
 
-          {list.length === 0 ? (
+          {recentList.length === 0 ? (
             <div className="mt-6 rounded-2xl border border-dashed border-[#E2E8F0] bg-[#F8FAFC] p-8 text-center">
               <p className="text-sm font-bold text-[#0F172A]">
                 No proposals available yet
@@ -182,13 +278,14 @@ async function DashboardDataSection() {
               )}
             </div>
           ) : (
-            <div className="mt-4 divide-y divide-slate-100">
-              {list.map((item) => {
+            <div className="mt-3 divide-y divide-slate-100">
+              {recentList.map((item) => {
                 const badge = getStatusBadge(item.status);
                 return (
-                  <div
+                  <Link
                     key={item.id}
-                    className="flex flex-wrap items-center justify-between gap-4 py-3.5"
+                    href={`/proposals/${item.id}`}
+                    className="flex flex-wrap items-center justify-between gap-4 rounded-xl px-2 py-3.5 transition hover:bg-slate-50"
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
@@ -198,12 +295,18 @@ async function DashboardDataSection() {
                         <span className="rounded-full bg-[#0F172A] px-2 py-0.5 text-[10px] font-bold text-white">
                           v{item.current_version}.0
                         </span>
+                        {item.activity_type && (
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                            {item.activity_type}
+                          </span>
+                        )}
                       </div>
                       <p className="mt-1 truncate text-sm font-bold text-[#0F172A]">
-                        {item.title}
+                        {item.title || "Untitled Proposal Draft"}
                       </p>
                       <p className="text-xs text-slate-500">
-                        {item.organization_name} • Event: {item.event_date} •{" "}
+                        {item.organization_name || "Unspecified Unit"} • Event:{" "}
+                        {item.event_date} •{" "}
                         {formatIdr(Number(item.total_budget))}
                       </p>
                     </div>
@@ -213,7 +316,7 @@ async function DashboardDataSection() {
                     >
                       {badge.label}
                     </span>
-                  </div>
+                  </Link>
                 );
               })}
             </div>
@@ -229,7 +332,7 @@ async function DashboardDataSection() {
               Recent Notifications
             </h2>
             <p className="text-xs text-slate-500">
-              Workflow updates for your campus account
+              Direct links to active proposal events
             </p>
           </div>
 
@@ -239,28 +342,46 @@ async function DashboardDataSection() {
             </div>
           ) : (
             <div className="mt-4 space-y-3">
-              {notifications.map((note) => (
-                <div
-                  key={note.id}
-                  className={`rounded-xl border p-3.5 ${
-                    note.is_read
-                      ? "border-[#E2E8F0] bg-[#F8FAFC]"
-                      : "border-[#1E3A8A]/30 bg-[#1E3A8A]/[0.04]"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs font-bold text-[#0F172A]">
-                      {note.title}
+              {notifications.map((note) => {
+                const cardBody = (
+                  <div
+                    className={`rounded-xl border p-3.5 transition ${
+                      note.is_read
+                        ? "border-[#E2E8F0] bg-[#F8FAFC] hover:bg-slate-100/70"
+                        : "border-[#1E3A8A]/30 bg-[#1E3A8A]/[0.04] hover:bg-[#1E3A8A]/[0.08]"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-bold text-[#0F172A]">
+                        {note.title}
+                      </p>
+                      {!note.is_read && (
+                        <span className="h-2 w-2 shrink-0 rounded-full bg-[#1E3A8A]" />
+                      )}
+                    </div>
+                    <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                      {note.message}
                     </p>
-                    {!note.is_read && (
-                      <span className="h-2 w-2 shrink-0 rounded-full bg-[#1E3A8A]" />
+                    {note.proposal_id && (
+                      <span className="mt-1.5 inline-block text-[11px] font-semibold text-[#1E3A8A]">
+                        Open Proposal →
+                      </span>
                     )}
                   </div>
-                  <p className="mt-1 text-xs leading-relaxed text-slate-600">
-                    {note.message}
-                  </p>
-                </div>
-              ))}
+                );
+
+                return note.proposal_id ? (
+                  <Link
+                    key={note.id}
+                    href={`/proposals/${note.proposal_id}`}
+                    className="block"
+                  >
+                    {cardBody}
+                  </Link>
+                ) : (
+                  <div key={note.id}>{cardBody}</div>
+                );
+              })}
             </div>
           )}
         </section>

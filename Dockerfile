@@ -1,4 +1,4 @@
-FROM node:20-alpine AS base
+FROM node:22-alpine AS base
 
 FROM base AS deps
 WORKDIR /app
@@ -7,6 +7,7 @@ RUN npm ci
 
 FROM base AS builder
 WORKDIR /app
+ENV NEXT_OUTPUT_STANDALONE=true
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build

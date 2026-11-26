@@ -39,18 +39,27 @@ async function AuthenticatedWorkspaceContainer({
   }
 
   const supabase = await createClient();
-  const [{ count: unreadCount }, { count: assignedApprovalsCount }] =
-    await Promise.all([
-      supabase
-        .from("notifications")
-        .select("id", { count: "exact", head: true })
-        .eq("user_id", profile.id)
-        .eq("is_read", false),
-      supabase
-        .from("proposal_signers")
-        .select("id", { count: "exact", head: true })
-        .eq("approver_id", profile.id),
-    ]);
+  const [
+    { count: unreadCount },
+    { data: recentNotifications },
+    { count: assignedApprovalsCount },
+  ] = await Promise.all([
+    supabase
+      .from("notifications")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", profile.id)
+      .eq("is_read", false),
+    supabase
+      .from("notifications")
+      .select("id, proposal_id, title, message, is_read, created_at")
+      .eq("user_id", profile.id)
+      .order("created_at", { ascending: false })
+      .limit(12),
+    supabase
+      .from("proposal_signers")
+      .select("id", { count: "exact", head: true })
+      .eq("approver_id", profile.id),
+  ]);
 
   return (
     <WorkspaceShell
@@ -64,6 +73,7 @@ async function AuthenticatedWorkspaceContainer({
         has_assigned_approvals: (assignedApprovalsCount ?? 0) > 0,
       }}
       unreadNotificationsCount={unreadCount ?? 0}
+      initialNotifications={recentNotifications ?? []}
     >
       {children}
     </WorkspaceShell>
