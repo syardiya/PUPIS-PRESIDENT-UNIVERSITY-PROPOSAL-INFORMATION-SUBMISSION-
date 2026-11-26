@@ -6,10 +6,33 @@ import { isAllowedInstitutionalEmail } from "../auth/domain";
 // ============================================================================
 
 export const MAX_PROPOSAL_PDF_BYTES = 10 * 1024 * 1024; // 10 MB
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024; // 10 MB
 export const MAX_SIGNATURE_PNG_BYTES = 2 * 1024 * 1024; // 2 MB
 
 export const PROPOSAL_PDF_MIME_TYPE = "application/pdf" as const;
 export const SIGNATURE_PNG_MIME_TYPE = "image/png" as const;
+
+export const ALLOWED_SUPPORTING_ATTACHMENT_MIMES = [
+  "application/pdf",
+  "image/png",
+  "image/jpeg",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+] as const;
+
+export type AllowedSupportingAttachmentMime =
+  (typeof ALLOWED_SUPPORTING_ATTACHMENT_MIMES)[number];
+
+export const ACTIVITY_CATEGORIES = [
+  "Academic Seminar / Symposium",
+  "Competition / Hackathon",
+  "Workshop / Bootcamp",
+  "Cultural & Arts Festival",
+  "Community Service (CSR)",
+  "Leadership & Organizational Training",
+  "Sports & Campus Tournament",
+  "Other Campus Activity",
+] as const;
 
 const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const UUID_REGEX =
@@ -19,10 +42,28 @@ const PDF_MAGIC_HEADER = [0x25, 0x50, 0x44, 0x46, 0x2d] as const; // "%PDF-"
 const PNG_MAGIC_HEADER = [
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ] as const;
+const JPEG_MAGIC_HEADER = [0xff, 0xd8, 0xff] as const;
+const ZIP_OOXML_MAGIC_HEADER = [0x50, 0x4b, 0x03, 0x04] as const; // PK.. (DOCX/XLSX)
 
 // ============================================================================
-// SHARED PRIMITIVE SCHEMAS
+// STRING SANITIZATION & SHARED PRIMITIVE SCHEMAS
 // ============================================================================
+
+function stripControlChars(input: string): string {
+  return input.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+}
+
+const cleanShortText = (maxLen: number) =>
+  z
+    .string()
+    .transform((v) => stripControlChars(v).trim())
+    .pipe(z.string().max(maxLen, `Cannot exceed ${maxLen} characters.`));
+
+const cleanLongText = (maxLen: number) =>
+  z
+    .string()
+    .transform((v) => stripControlChars(v).trim())
+    .pipe(z.string().max(maxLen, `Cannot exceed ${maxLen} characters.`));
 
 export const uuidSchema = z
   .string()
@@ -38,51 +79,116 @@ export const institutionalEmailSchema = z
       "Email must belong to an allowed President University domain (@student.president.ac.id or @president.ac.id).",
   });
 
+function isValidIsoCalendarDate(val: string): boolean {
+  if (!ISO_DATE_REGEX.test(val)) return false;
+  const [yearStr, monthStr, dayStr] = val.split("-");
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  const day = Number(dayStr);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return (
+    parsed.getUTCFullYear() === year &&
+    parsed.getUTCMonth() === month - 1 &&
+    parsed.getUTCDate() === day
+  );
+}
+
 export const isoCalendarDateSchema = z
   .string()
   .trim()
-  .regex(ISO_DATE_REGEX, "Event date must use YYYY-MM-DD format.")
-  .refine(
-    (val) => {
-      const [yearStr, monthStr, dayStr] = val.split("-");
-      const year = Number(yearStr);
-      const month = Number(monthStr);
-      const day = Number(dayStr);
-      const parsed = new Date(Date.UTC(year, month - 1, day));
-      return (
-        parsed.getUTCFullYear() === year &&
-        parsed.getUTCMonth() === month - 1 &&
-        parsed.getUTCDate() === day
-      );
-    },
-    { message: "Event date is not a valid calendar date." }
-  );
+  .refine(isValidIsoCalendarDate, {
+    message: "Date must use a valid YYYY-MM-DD calendar format.",
+  });
+
+export const optionalDraftDateSchema = z
+  .union([z.literal(""), isoCalendarDateSchema, z.null()])
+  .optional()
+  .transform((val) => (val === "" ? null : val));
 
 /**
  * Matches `NUMERIC(15, 2) CHECK (total_budget >= 0)` in `public.proposals`.
  */
 export const totalBudgetSchema = z
   .number()
-  .finite("Total budget must be a finite number.")
-  .min(0, "Total budget cannot be negative.")
-  .max(9_999_999_999_999.99, "Total budget exceeds maximum NUMERIC(15,2) limit.")
-  .refine((val) => Math.round(val * 100) === val * 100 || Number(val.toFixed(2)) === val, {
-    message: "Total budget can have at most 2 decimal places.",
-  });
+  .finite("Budget amount must be a finite number.")
+  .min(0, "Budget amount cannot be negative.")
+  .max(9_999_999_999_999.99, "Budget amount exceeds maximum NUMERIC(15,2) limit.")
+  .refine(
+    (val) =>
+      Math.round(val * 100) === val * 100 || Number(val.toFixed(2)) === val,
+    {
+      message: "Budget amount can have at most 2 decimal places.",
+    }
+  );
 
 // ============================================================================
-// 1. PROPOSAL CREATION & DRAFT UPDATE SCHEMAS (`.strict()`)
+// RAB / BUDGET LINE ITEMS SCHEMA (`.strict()`)
+// ============================================================================
+
+export const budgetLineItemDraftSchema = z
+  .object({
+    id: cleanShortText(80),
+    category: cleanShortText(100),
+    description: cleanShortText(240),
+    quantity: z
+      .number()
+      .finite()
+      .min(0, "Quantity cannot be negative.")
+      .max(1_000_000, "Quantity exceeds maximum allowed."),
+    unit: cleanShortText(40),
+    unit_price: totalBudgetSchema,
+    subtotal: totalBudgetSchema.optional(),
+  })
+  .strict();
+
+export const budgetLineItemStrictSchema = z
+  .object({
+    id: cleanShortText(80).refine((v) => v.length >= 1, {
+      message: "Budget line item ID is required.",
+    }),
+    category: cleanShortText(100).refine((v) => v.length >= 2, {
+      message: "Budget item category is required (min 2 characters).",
+    }),
+    description: cleanShortText(240).refine((v) => v.length >= 2, {
+      message: "Budget item description is required (min 2 characters).",
+    }),
+    quantity: z
+      .number()
+      .finite()
+      .gt(0, "Budget item quantity must be greater than 0.")
+      .max(1_000_000, "Quantity exceeds maximum allowed."),
+    unit: cleanShortText(40).refine((v) => v.length >= 1, {
+      message: "Budget item unit (e.g., pcs, pax, package) is required.",
+    }),
+    unit_price: totalBudgetSchema,
+    subtotal: totalBudgetSchema,
+  })
+  .strict();
+
+export function computeBudgetItemsGrandTotal(
+  items: ReadonlyArray<{ quantity: number; unit_price: number }>
+): number {
+  const rawTotal = items.reduce((acc, item) => {
+    const qty = Number.isFinite(item.quantity) && item.quantity >= 0 ? item.quantity : 0;
+    const price =
+      Number.isFinite(item.unit_price) && item.unit_price >= 0 ? item.unit_price : 0;
+    return acc + Math.round(qty * price * 100) / 100;
+  }, 0);
+
+  return Math.round(rawTotal * 100) / 100;
+}
+
+// ============================================================================
+// ORDERED SIGNERS & CC SCHEMAS (`.strict()`)
 // ============================================================================
 
 export const proposalSignerItemSchema = z
   .object({
     approver_id: uuidSchema.optional(),
     approver_email: institutionalEmailSchema.optional(),
-    role_title: z
-      .string()
-      .trim()
-      .min(2, "Signer role_title must be at least 2 characters.")
-      .max(120, "Signer role_title cannot exceed 120 characters."),
+    role_title: cleanShortText(120).refine((v) => v.length >= 2, {
+      message: "Signer role_title must be at least 2 characters.",
+    }),
     step_order: z
       .number()
       .int("step_order must be an integer.")
@@ -109,8 +215,12 @@ export const ccUserRecipientSchema = z.union([
     }),
 ]);
 
-function validateSignersSequence(
-  signers: z.infer<typeof proposalSignerItemSchema>[],
+export function validateSignersSequence(
+  signers: ReadonlyArray<{
+    approver_id?: string;
+    approver_email?: string;
+    step_order: number;
+  }>,
   ctx: z.RefinementCtx
 ) {
   const sortedOrders = signers.map((s) => s.step_order).sort((a, b) => a - b);
@@ -143,131 +253,212 @@ function validateSignersSequence(
   });
 }
 
-/**
- * Full schema for formal proposal creation / submission (`pending_ttd` or `v1 -> v2` resubmission).
- */
-export const proposalCreateSchema = z
-  .object({
-    title: z
-      .string()
-      .trim()
-      .min(3, "Proposal title must be at least 3 characters.")
-      .max(200, "Proposal title cannot exceed 200 characters."),
-    activity_type: z
-      .string()
-      .trim()
-      .min(2, "Activity type must be at least 2 characters.")
-      .max(100, "Activity type cannot exceed 100 characters."),
-    organization_name: z
-      .string()
-      .trim()
-      .min(2, "Organization name must be at least 2 characters.")
-      .max(150, "Organization name cannot exceed 150 characters.")
-      .optional(),
-    person_in_charge: z
-      .string()
-      .trim()
-      .min(2, "Person in charge must be at least 2 characters.")
-      .max(150, "Person in charge cannot exceed 150 characters.")
-      .optional(),
-    venue: z
-      .string()
-      .trim()
-      .min(2, "Venue must be at least 2 characters.")
-      .max(200, "Venue cannot exceed 200 characters.")
-      .optional(),
-    event_date: isoCalendarDateSchema,
-    total_budget: totalBudgetSchema,
-    budget_breakdown: z
-      .string()
-      .trim()
-      .min(5, "Budget breakdown must be at least 5 characters.")
-      .max(10_000, "Budget breakdown cannot exceed 10,000 characters.")
-      .optional(),
-    executive_summary: z
-      .string()
-      .trim()
-      .min(10, "Executive summary must be at least 10 characters.")
-      .max(10_000, "Executive summary cannot exceed 10,000 characters.")
-      .optional(),
-    pdf_storage_path: z
-      .string()
-      .trim()
-      .min(1)
-      .max(255, "pdf_storage_path cannot exceed 255 characters.")
-      .optional(),
-    status: z.enum(["draft", "pending_ttd"]).default("pending_ttd"),
-    signers: z
-      .array(proposalSignerItemSchema)
-      .min(1, "At least one TTD signer is required.")
-      .max(10, "Cannot exceed 10 sequential TTD signers."),
-    cc_users: z
-      .array(ccUserRecipientSchema)
-      .max(25, "Cannot exceed 25 CC stakeholders.")
-      .default([]),
-  })
-  .strict()
-  .superRefine((data, ctx) => {
-    validateSignersSequence(data.signers, ctx);
-  });
+// ============================================================================
+// 1. DRAFT CREATE & AUTO-SAVE PATCH SCHEMAS (`.strict()`)
+// ============================================================================
 
 /**
- * Schema for saving or updating a proposal draft (`status = 'draft'`).
+ * Used by `POST /api/proposals` when initializing a brand-new proposal draft.
+ * Allows partial/empty fields while strictly rejecting unknown properties.
  */
-export const proposalDraftUpdateSchema = z
+export const proposalDraftCreateSchema = z
   .object({
-    title: z
-      .string()
-      .trim()
-      .min(1, "Draft title cannot be empty.")
-      .max(200, "Proposal title cannot exceed 200 characters.")
-      .optional(),
-    activity_type: z
-      .string()
-      .trim()
-      .min(1, "Activity type cannot be empty.")
-      .max(100, "Activity type cannot exceed 100 characters.")
-      .optional(),
-    organization_name: z.string().trim().max(150).optional(),
-    person_in_charge: z.string().trim().max(150).optional(),
-    venue: z.string().trim().max(200).optional(),
-    event_date: isoCalendarDateSchema.optional(),
+    title: cleanShortText(200).optional(),
+    activity_type: cleanShortText(100).nullable().optional(),
+    organization_name: cleanShortText(150).optional(),
+    person_in_charge: cleanShortText(150).optional(),
+    event_date: optionalDraftDateSchema,
+    event_end_date: optionalDraftDateSchema,
+    venue: cleanShortText(200).optional(),
+    background: cleanLongText(10_000).nullable().optional(),
+    objectives: cleanLongText(10_000).nullable().optional(),
+    target_audience: cleanLongText(4_000).nullable().optional(),
+    budget_items: z.array(budgetLineItemDraftSchema).max(100).optional(),
     total_budget: totalBudgetSchema.optional(),
-    budget_breakdown: z.string().trim().max(10_000).optional(),
-    executive_summary: z.string().trim().max(10_000).optional(),
-    pdf_storage_path: z.string().trim().max(255).optional(),
     signers: z.array(proposalSignerItemSchema).max(10).optional(),
     cc_users: z.array(ccUserRecipientSchema).max(25).optional(),
   })
   .strict()
   .superRefine((data, ctx) => {
+    if (
+      data.event_date &&
+      data.event_end_date &&
+      data.event_end_date < data.event_date
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["event_end_date"],
+        message: "Event end date cannot be earlier than the event start date.",
+      });
+    }
     if (data.signers && data.signers.length > 0) {
       validateSignersSequence(data.signers, ctx);
     }
   });
 
-export type ProposalCreateInput = z.infer<typeof proposalCreateSchema>;
-export type ProposalDraftUpdateInput = z.infer<typeof proposalDraftUpdateSchema>;
+/**
+ * Used by `PATCH /api/proposals/[id]` for debounced draft auto-save & revision edits.
+ */
+export const proposalDraftUpdateSchema = z
+  .object({
+    title: cleanShortText(200).optional(),
+    activity_type: cleanShortText(100).nullable().optional(),
+    organization_name: cleanShortText(150).optional(),
+    person_in_charge: cleanShortText(150).optional(),
+    event_date: optionalDraftDateSchema,
+    event_end_date: optionalDraftDateSchema,
+    venue: cleanShortText(200).optional(),
+    background: cleanLongText(10_000).nullable().optional(),
+    objectives: cleanLongText(10_000).nullable().optional(),
+    target_audience: cleanLongText(4_000).nullable().optional(),
+    budget_breakdown: cleanLongText(10_000).optional(),
+    executive_summary: cleanLongText(10_000).optional(),
+    pdf_storage_path: cleanShortText(255).optional(),
+    budget_items: z.array(budgetLineItemDraftSchema).max(100).optional(),
+    total_budget: totalBudgetSchema.optional(),
+    signers: z.array(proposalSignerItemSchema).max(10).optional(),
+    cc_users: z.array(ccUserRecipientSchema).max(25).optional(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (
+      data.event_date &&
+      data.event_end_date &&
+      data.event_end_date < data.event_date
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["event_end_date"],
+        message: "Event end date cannot be earlier than the event start date.",
+      });
+    }
+    if (data.signers && data.signers.length > 0) {
+      validateSignersSequence(data.signers, ctx);
+    }
+  });
 
 // ============================================================================
-// 2. SIGNER ACTION SCHEMA (`approve` | `reject` | `request_revision`)
+// 2. FINAL PROPOSAL SUBMISSION SCHEMAS (`submit`, `.strict()`)
+// ============================================================================
+
+/**
+ * Optional request body sent to `POST /api/proposals/[id]/submit`.
+ */
+export const proposalSubmitBodySchema = z
+  .object({
+    submission_note: cleanLongText(2_000).optional(),
+  })
+  .strict();
+
+/**
+ * Strictly validates the assembled proposal state right before transitioning
+ * from `draft` / `needs_revision` to `pending_ttd` (In Review).
+ */
+export const proposalFinalSubmissionSchema = z
+  .object({
+    title: cleanShortText(200).refine((v) => v.length >= 5, {
+      message: "Proposal title is required (minimum 5 characters).",
+    }),
+    activity_type: cleanShortText(100).refine((v) => v.length >= 2, {
+      message: "Activity category is required.",
+    }),
+    organization_name: cleanShortText(150).refine((v) => v.length >= 2, {
+      message: "Student organization / unit name is required.",
+    }),
+    person_in_charge: cleanShortText(150).refine((v) => v.length >= 2, {
+      message: "Person in Charge (PIC) name is required.",
+    }),
+    event_date: isoCalendarDateSchema,
+    event_end_date: isoCalendarDateSchema.nullable(),
+    venue: cleanShortText(200).refine((v) => v.length >= 2, {
+      message: "Event location / venue is required.",
+    }),
+    background: cleanLongText(10_000).refine((v) => v.length >= 20, {
+      message:
+        "Background & activity description must be at least 20 characters.",
+    }),
+    objectives: cleanLongText(10_000).refine((v) => v.length >= 15, {
+      message: "Program objectives must be at least 15 characters.",
+    }),
+    target_audience: cleanLongText(4_000).refine((v) => v.length >= 5, {
+      message: "Target audience / participants description is required.",
+    }),
+    budget_items: z
+      .array(budgetLineItemStrictSchema)
+      .min(1, "At least one RAB / budget line item is required.")
+      .max(100, "Cannot exceed 100 budget line items."),
+    total_budget: totalBudgetSchema,
+    signers: z
+      .array(
+        z
+          .object({
+            approver_id: uuidSchema,
+            role_title: cleanShortText(120).refine((v) => v.length >= 2, {
+              message: "Signer role title is required.",
+            }),
+            step_order: z.number().int().min(1),
+          })
+          .strict()
+      )
+      .min(1, "At least one institutional TTD approver must be assigned.")
+      .max(10, "Cannot exceed 10 sequential TTD approvers."),
+    has_submitter_signature: z.literal(true, {
+      error:
+        "You must save an active digital signature (TTD) on your Profile page before submitting a proposal.",
+    }),
+    attachments_count: z
+      .number()
+      .int()
+      .min(
+        1,
+        "Please upload at least one supporting document (e.g., Proposal PDF) before submitting."
+      ),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.event_end_date && data.event_end_date < data.event_date) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["event_end_date"],
+        message: "Event end date cannot be earlier than the event start date.",
+      });
+    }
+
+    validateSignersSequence(data.signers, ctx);
+
+    const expectedTotal = computeBudgetItemsGrandTotal(data.budget_items);
+    if (Math.abs(data.total_budget - expectedTotal) > 0.01) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["total_budget"],
+        message: `Total budget (${data.total_budget}) does not match the sum of RAB line items (${expectedTotal}).`,
+      });
+    }
+  });
+
+/**
+ * Legacy compatibility export (`proposalCreateSchema`) kept strict for callers.
+ */
+export const proposalCreateSchema = proposalDraftCreateSchema;
+
+export type BudgetLineItemInput = z.infer<typeof budgetLineItemDraftSchema>;
+export type ProposalDraftCreateInput = z.infer<typeof proposalDraftCreateSchema>;
+export type ProposalCreateInput = ProposalDraftCreateInput;
+export type ProposalDraftUpdateInput = z.infer<typeof proposalDraftUpdateSchema>;
+export type ProposalFinalSubmissionInput = z.infer<
+  typeof proposalFinalSubmissionSchema
+>;
+
+// ============================================================================
+// 3. SIGNER ACTION SCHEMA (`approve` | `reject` | `request_revision`)
 // ============================================================================
 
 export const signerActionSchema = z
   .object({
     action: z.enum(["approve", "reject", "request_revision"]),
-    notes: z
-      .string()
-      .trim()
-      .max(2000, "Decision notes cannot exceed 2,000 characters.")
-      .optional(),
+    notes: cleanLongText(2000).optional(),
     signature_type: z.enum(["drawn", "stamp"]).optional(),
-    signature_storage_path: z
-      .string()
-      .trim()
-      .min(1)
-      .max(255, "signature_storage_path cannot exceed 255 characters.")
-      .optional(),
+    signature_storage_path: cleanShortText(255).optional(),
   })
   .strict()
   .superRefine((data, ctx) => {
@@ -295,12 +486,13 @@ export const signerActionSchema = z
 export type SignerActionInput = z.infer<typeof signerActionSchema>;
 
 // ============================================================================
-// 3. FILE UPLOAD VALIDATION HELPERS (PDF <= 10MB, PNG <= 2MB, SAFE FILENAMES)
+// 4. FILE UPLOAD VALIDATION HELPERS (PDF, PNG, JPEG, DOCX/XLSX + MAGIC BYTES)
 // ============================================================================
 
 export interface FileValidationResult {
   valid: boolean;
   safeFilename?: string;
+  detectedMime?: string;
   error?: string;
 }
 
@@ -339,10 +531,102 @@ function hasMagicBytes(
 }
 
 /**
- * Validates a proposal document upload:
- * - Strictly `application/pdf` MIME type & `.pdf` extension
- * - Non-empty and max 10 MB (`10_485_760` bytes)
- * - Optionally verifies `%PDF-` magic header bytes on the server
+ * Validates supporting proposal attachment uploads:
+ * - Allowed types: PDF (`application/pdf`), PNG (`image/png`), JPG/JPEG (`image/jpeg`),
+ *   DOCX (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`),
+ *   XLSX (`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`)
+ * - Max file size: 10 MB (`10_485_760` bytes)
+ * - Verifies binary magic bytes for PDF, PNG, JPEG, and OOXML ZIP containers.
+ */
+export async function validateSupportingAttachmentFile(
+  file: File
+): Promise<FileValidationResult> {
+  if (!(file instanceof File)) {
+    return { valid: false, error: "Invalid file upload payload." };
+  }
+
+  if (file.size <= 0) {
+    return { valid: false, error: "Uploaded file cannot be empty." };
+  }
+
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    return {
+      valid: false,
+      error: "Attachment exceeds the maximum allowed size of 10 MB.",
+    };
+  }
+
+  const safeFilename = sanitizeStorageFilename(file.name);
+  const lowerName = safeFilename.toLowerCase();
+  const mime = file.type as AllowedSupportingAttachmentMime;
+
+  if (!ALLOWED_SUPPORTING_ATTACHMENT_MIMES.includes(mime)) {
+    return {
+      valid: false,
+      error:
+        "Unsupported file type. Allowed formats: PDF, PNG, JPG/JPEG, DOCX, and XLSX (max 10 MB).",
+    };
+  }
+
+  const headerBytes = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+
+  if (mime === "application/pdf") {
+    if (!lowerName.endsWith(".pdf") || !hasMagicBytes(headerBytes, PDF_MAGIC_HEADER)) {
+      return {
+        valid: false,
+        error: "File does not match a valid PDF document header.",
+      };
+    }
+  } else if (mime === "image/png") {
+    if (!lowerName.endsWith(".png") || !hasMagicBytes(headerBytes, PNG_MAGIC_HEADER)) {
+      return {
+        valid: false,
+        error: "File does not match a valid PNG image header.",
+      };
+    }
+  } else if (mime === "image/jpeg") {
+    if (
+      (!lowerName.endsWith(".jpg") && !lowerName.endsWith(".jpeg")) ||
+      !hasMagicBytes(headerBytes, JPEG_MAGIC_HEADER)
+    ) {
+      return {
+        valid: false,
+        error: "File does not match a valid JPEG image header.",
+      };
+    }
+  } else if (
+    mime ===
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  ) {
+    if (
+      !lowerName.endsWith(".docx") ||
+      !hasMagicBytes(headerBytes, ZIP_OOXML_MAGIC_HEADER)
+    ) {
+      return {
+        valid: false,
+        error: "File does not match a valid DOCX container.",
+      };
+    }
+  } else if (
+    mime ===
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  ) {
+    if (
+      !lowerName.endsWith(".xlsx") ||
+      !hasMagicBytes(headerBytes, ZIP_OOXML_MAGIC_HEADER)
+    ) {
+      return {
+        valid: false,
+        error: "File does not match a valid XLSX container.",
+      };
+    }
+  }
+
+  return { valid: true, safeFilename, detectedMime: mime };
+}
+
+/**
+ * Validates a proposal PDF document upload (strictly `application/pdf`, max 10 MB).
  */
 export async function validateProposalPdfFile(
   file: File,
@@ -375,7 +659,9 @@ export async function validateProposalPdfFile(
   }
 
   if (options.verifyMagicBytes !== false) {
-    const headerBuffer = await file.slice(0, PDF_MAGIC_HEADER.length).arrayBuffer();
+    const headerBuffer = await file
+      .slice(0, PDF_MAGIC_HEADER.length)
+      .arrayBuffer();
     if (!hasMagicBytes(new Uint8Array(headerBuffer), PDF_MAGIC_HEADER)) {
       return {
         valid: false,
@@ -384,14 +670,11 @@ export async function validateProposalPdfFile(
     }
   }
 
-  return { valid: true, safeFilename };
+  return { valid: true, safeFilename, detectedMime: PROPOSAL_PDF_MIME_TYPE };
 }
 
 /**
- * Validates a user digital signature upload:
- * - Strictly `image/png` MIME type & `.png` extension
- * - Non-empty and max 2 MB (`2_097_152` bytes)
- * - Optionally verifies PNG binary magic bytes (`89 50 4E 47 0D 0A 1A 0A`)
+ * Validates a user digital signature upload (strictly `image/png`, max 2 MB).
  */
 export async function validateSignaturePngFile(
   file: File,
@@ -424,7 +707,9 @@ export async function validateSignaturePngFile(
   }
 
   if (options.verifyMagicBytes !== false) {
-    const headerBuffer = await file.slice(0, PNG_MAGIC_HEADER.length).arrayBuffer();
+    const headerBuffer = await file
+      .slice(0, PNG_MAGIC_HEADER.length)
+      .arrayBuffer();
     if (!hasMagicBytes(new Uint8Array(headerBuffer), PNG_MAGIC_HEADER)) {
       return {
         valid: false,
@@ -433,5 +718,5 @@ export async function validateSignaturePngFile(
     }
   }
 
-  return { valid: true, safeFilename };
+  return { valid: true, safeFilename, detectedMime: SIGNATURE_PNG_MIME_TYPE };
 }

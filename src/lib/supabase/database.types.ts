@@ -30,6 +30,18 @@ export type RevisionActionTypeDb =
   | "revision_requested"
   | "resubmitted";
 
+export type AttachmentKindDb = "primary_proposal_pdf" | "supporting";
+
+export interface BudgetLineItemDb {
+  id: string;
+  category: string;
+  description: string;
+  quantity: number;
+  unit: string;
+  unit_price: number;
+  subtotal: number;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -69,10 +81,16 @@ export interface Database {
           proposal_code: string;
           submitter_id: string;
           title: string;
+          activity_type: string | null;
           organization_name: string;
           person_in_charge: string;
           event_date: string;
+          event_end_date: string | null;
           venue: string;
+          background: string | null;
+          objectives: string | null;
+          target_audience: string | null;
+          budget_items: Json;
           total_budget: number;
           status: ProposalStatusDb;
           current_version: number;
@@ -83,11 +101,17 @@ export interface Database {
           id?: string;
           proposal_code: string;
           submitter_id: string;
-          title: string;
-          organization_name: string;
-          person_in_charge: string;
-          event_date: string;
-          venue: string;
+          title?: string;
+          activity_type?: string | null;
+          organization_name?: string;
+          person_in_charge?: string;
+          event_date?: string;
+          event_end_date?: string | null;
+          venue?: string;
+          background?: string | null;
+          objectives?: string | null;
+          target_audience?: string | null;
+          budget_items?: Json;
           total_budget?: number;
           status?: ProposalStatusDb;
           current_version?: number;
@@ -99,10 +123,16 @@ export interface Database {
           proposal_code?: string;
           submitter_id?: string;
           title?: string;
+          activity_type?: string | null;
           organization_name?: string;
           person_in_charge?: string;
           event_date?: string;
+          event_end_date?: string | null;
           venue?: string;
+          background?: string | null;
+          objectives?: string | null;
+          target_audience?: string | null;
+          budget_items?: Json;
           total_budget?: number;
           status?: ProposalStatusDb;
           current_version?: number;
@@ -162,6 +192,7 @@ export interface Database {
           id: string;
           proposal_id: string;
           approver_id: string;
+          role_title: string;
           step_order: number;
           status: SignerStatusDb;
           signature_type: SignatureTypeDb | null;
@@ -173,6 +204,7 @@ export interface Database {
           id?: string;
           proposal_id: string;
           approver_id: string;
+          role_title?: string;
           step_order: number;
           status?: SignerStatusDb;
           signature_type?: SignatureTypeDb | null;
@@ -184,6 +216,7 @@ export interface Database {
           id?: string;
           proposal_id?: string;
           approver_id?: string;
+          role_title?: string;
           step_order?: number;
           status?: SignerStatusDb;
           signature_type?: SignatureTypeDb | null;
@@ -238,6 +271,49 @@ export interface Database {
           {
             foreignKeyName: "proposal_cc_stakeholder_id_fkey";
             columns: ["stakeholder_id"];
+            isOneToOne: false;
+            referencedRelation: "users";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      proposal_attachments: {
+        Row: {
+          id: string;
+          proposal_id: string;
+          uploaded_by: string;
+          file_name: string;
+          mime_type: string;
+          file_size: number;
+          storage_path: string;
+          attachment_kind: AttachmentKindDb;
+          version_number: number;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          proposal_id: string;
+          uploaded_by: string;
+          file_name: string;
+          mime_type: string;
+          file_size: number;
+          storage_path: string;
+          attachment_kind?: AttachmentKindDb;
+          version_number?: number;
+          created_at?: string;
+        };
+        Update: never;
+        Relationships: [
+          {
+            foreignKeyName: "proposal_attachments_proposal_id_fkey";
+            columns: ["proposal_id"];
+            isOneToOne: false;
+            referencedRelation: "proposals";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "proposal_attachments_uploaded_by_fkey";
+            columns: ["uploaded_by"];
             isOneToOne: false;
             referencedRelation: "users";
             referencedColumns: ["id"];
@@ -330,6 +406,10 @@ export interface Database {
         Returns: boolean;
       };
       is_proposal_submitter: {
+        Args: { p_proposal_id: string; p_user_id?: string };
+        Returns: boolean;
+      };
+      is_proposal_editable_by_submitter: {
         Args: { p_proposal_id: string; p_user_id?: string };
         Returns: boolean;
       };
