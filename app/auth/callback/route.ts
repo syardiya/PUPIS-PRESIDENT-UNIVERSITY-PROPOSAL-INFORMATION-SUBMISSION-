@@ -1,59 +1,58 @@
 import { NextResponse, type NextRequest } from "next/server";
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { createClient } from "@/src/lib/supabase/server";
-import { createAdminClient } from "@/src/lib/supabase/admin";
-import type { UserRole } from "@/src/lib/supabase/database.types";
+import { resolveCleanAppOrigin } from "@/src/lib/supabase/url";
 import {
-  extractEmailDomain,
   isAllowedInstitutionalEmail,
   sanitizeRedirectPath,
 } from "@/src/lib/auth/domain";
+import { ensureCampusUserProfile } from "@/src/lib/auth/guard";
 
-function deriveDisplayName(email: string, metadata: Record<string, unknown>): string {
-  const metaFullName =
-    typeof metadata.full_name === "string" ? metadata.full_name.trim() : "";
-  if (metaFullName) return metaFullName;
+function resolveCallbackRedirectOrigin(request: NextRequest): string {
+  const forwardedHost = request.headers
+    .get("x-forwarded-host")
+    ?.split(",")[0]
+    ?.trim();
+  const forwardedProto =
+    request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || "https";
 
-  const metaName =
-    typeof metadata.name === "string" ? metadata.name.trim() : "";
-  if (metaName) return metaName;
-
-  const localPart = email.split("@")[0] ?? "Campus User";
-  return localPart
-    .split(/[._-]+/)
-    .filter(Boolean)
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(" ");
-}
-
-/**
- * Maps institutional email domain to canonical `public.users.role` (`student` | `staff` | `admin`)
- * when creating a fallback profile record (if not already configured in `public.users`).
- * - `@president.ac.id` -> `'admin'` (unless already configured in `public.users`)
- * - `@student.president.ac.id` -> `'student'` (canonical submitter role per `users_role_check`)
- */
-function resolveFallbackProfileRole(email: string): UserRole {
-  const domain = extractEmailDomain(email);
-  if (domain === "president.ac.id") {
-    return "admin";
+  if (forwardedHost) {
+    return resolveCleanAppOrigin(`${forwardedProto}://${forwardedHost}`);
   }
-  return "student";
+
+  return resolveCleanAppOrigin(request.nextUrl.origin);
 }
 
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url);
+  const redirectOrigin = resolveCallbackRedirectOrigin(request);
+
   const code = requestUrl.searchParams.get("code");
   const tokenHash = requestUrl.searchParams.get("token_hash");
   const otpType = requestUrl.searchParams.get("type") as EmailOtpType | null;
-  const nextPath = sanitizeRedirectPath(requestUrl.searchParams.get("next"));
+
+  const rawCookieNext = request.cookies.get("pupis_auth_next")?.value;
+  let decodedCookieNext: string | undefined;
+  if (rawCookieNext) {
+    try {
+      decodedCookieNext = decodeURIComponent(rawCookieNext);
+    } catch {
+      decodedCookieNext = undefined;
+    }
+  }
+  const nextPath = sanitizeRedirectPath(
+    requestUrl.searchParams.get("next") ?? decodedCookieNext
+  );
 
   const buildLoginErrorRedirect = (errorCode: string) => {
-    const loginUrl = new URL("/login", requestUrl.origin);
+    const loginUrl = new URL("/login", redirectOrigin);
     loginUrl.searchParams.set("error", errorCode);
     if (nextPath !== "/dashboard") {
       loginUrl.searchParams.set("next", nextPath);
     }
-    return NextResponse.redirect(loginUrl);
+    const response = NextResponse.redirect(loginUrl);
+    response.cookies.delete("pupis_auth_next");
+    return response;
   };
 
   if (!code && !(tokenHash && otpType)) {
@@ -98,47 +97,19 @@ export async function GET(request: NextRequest) {
       return buildLoginErrorRedirect("unauthorized_domain");
     }
 
-    // Ensure a corresponding profile record exists in `public.users` without overwriting configured roles
-    const dbClient = process.env.SUPABASE_SERVICE_ROLE_KEY
-      ? createAdminClient()
-      : supabase;
-
-    const { data: existingProfile, error: selectError } = await dbClient
-      .from("users")
-      .select("id, role")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (selectError) {
-      return buildLoginErrorRedirect("profile_lookup_failed");
+    // Ensure profile record exists in `public.users` without overwriting configured roles
+    try {
+      await ensureCampusUserProfile(supabase, user);
+    } catch {
+      return buildLoginErrorRedirect("profile_sync_failed");
     }
 
-    if (!existingProfile) {
-      const metadata = (user.user_metadata ?? {}) as Record<string, unknown>;
-      const fullName = deriveDisplayName(normalizedEmail, metadata);
-      const organizationUnit =
-        typeof metadata.organization_unit === "string" &&
-        metadata.organization_unit.trim() !== ""
-          ? metadata.organization_unit.trim()
-          : null;
-
-      const defaultRole = resolveFallbackProfileRole(normalizedEmail);
-
-      const { error: insertError } = await dbClient.from("users").insert({
-        id: user.id,
-        email: normalizedEmail,
-        full_name: fullName,
-        organization_unit: organizationUnit,
-        role: defaultRole,
-      });
-
-      if (insertError) {
-        return buildLoginErrorRedirect("profile_sync_failed");
-      }
-    }
-
-    return NextResponse.redirect(new URL(nextPath, requestUrl.origin));
+    const destinationResponse = NextResponse.redirect(
+      new URL(nextPath, redirectOrigin)
+    );
+    destinationResponse.cookies.delete("pupis_auth_next");
+    return destinationResponse;
   } catch {
-    return buildLoginErrorRedirect("unexpected_auth_error");
+    return buildLoginErrorRedirect("auth_callback_failed");
   }
 }

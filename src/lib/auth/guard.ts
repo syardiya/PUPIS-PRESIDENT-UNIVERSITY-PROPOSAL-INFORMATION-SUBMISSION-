@@ -1,13 +1,21 @@
 import "server-only";
 
 import { NextResponse } from "next/server";
-import { createClient } from "../supabase/server";
-import type { UserRole } from "../supabase/database.types";
-import { isAllowedInstitutionalEmail } from "./domain";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
+import { createClient } from "@/src/lib/supabase/server";
+import { createAdminClient } from "@/src/lib/supabase/admin";
+import { normalizeEnvValue } from "@/src/lib/supabase/url";
+import type { Database, UserRole } from "@/src/lib/supabase/database.types";
+import {
+  extractEmailDomain,
+  isAllowedInstitutionalEmail,
+} from "@/src/lib/auth/domain";
 
 export const SIGNATURES_BUCKET =
   process.env.NEXT_PUBLIC_SIGNATURES_BUCKET || "user-signatures";
 export const SIGNED_URL_TTL_SECONDS = 300; // 5-minute short-lived signed URL per Zero Trust standard
+
+export type CampusUserRow = Database["public"]["Tables"]["users"]["Row"];
 
 export type AuthGuardErrorCode =
   | "UNAUTHENTICATED"
@@ -54,6 +62,114 @@ export function isApproverOrAdminRole(role: UserRole | string): boolean {
   return role === "staff" || role === "approver" || role === "admin";
 }
 
+function deriveCampusDisplayName(
+  email: string,
+  metadata: Record<string, unknown>
+): string {
+  const metaFullName =
+    typeof metadata.full_name === "string" ? metadata.full_name.trim() : "";
+  if (metaFullName) return metaFullName;
+
+  const metaName =
+    typeof metadata.name === "string" ? metadata.name.trim() : "";
+  if (metaName) return metaName;
+
+  const localPart = email.split("@")[0] ?? "Campus User";
+  return localPart
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
+}
+
+function resolveDefaultCampusRole(email: string): UserRole {
+  const domain = extractEmailDomain(email);
+  return domain === "president.ac.id" ? "staff" : "student";
+}
+
+/**
+ * Idempotently ensures an authenticated President University user
+ * (`@student.president.ac.id` or `@president.ac.id`) has a corresponding row
+ * in `public.users` without overwriting existing configured roles.
+ */
+export async function ensureCampusUserProfile(
+  supabase: SupabaseClient<Database>,
+  user: User
+): Promise<CampusUserRow> {
+  const normalizedEmail = (user.email ?? "").trim().toLowerCase();
+  if (!isAllowedInstitutionalEmail(normalizedEmail)) {
+    throw new AuthGuardError(
+      "UNAUTHORIZED_DOMAIN",
+      "Access restricted to President University (@student.president.ac.id or @president.ac.id) accounts.",
+      403
+    );
+  }
+
+  const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+    ? createAdminClient()
+    : supabase;
+
+  const { data: existingProfile, error: selectError } = await dbClient
+    .from("users")
+    .select("*")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  if (selectError) {
+    throw new AuthGuardError(
+      "PROFILE_NOT_FOUND",
+      "Unable to look up campus user profile in public.users.",
+      403
+    );
+  }
+
+  if (existingProfile) {
+    return existingProfile;
+  }
+
+  const metadata = (user.user_metadata ?? {}) as Record<string, unknown>;
+  const fullName = deriveCampusDisplayName(normalizedEmail, metadata);
+  const organizationUnit =
+    typeof metadata.organization_unit === "string" &&
+    metadata.organization_unit.trim() !== ""
+      ? metadata.organization_unit.trim()
+      : null;
+  const defaultRole = resolveDefaultCampusRole(normalizedEmail);
+
+  const { data: insertedProfile, error: insertError } = await dbClient
+    .from("users")
+    .insert({
+      id: user.id,
+      email: normalizedEmail,
+      full_name: fullName,
+      organization_unit: organizationUnit,
+      role: defaultRole,
+    })
+    .select("*")
+    .single();
+
+  if (!insertError && insertedProfile) {
+    return insertedProfile;
+  }
+
+  // Handle concurrent provisioning race (e.g., `on_auth_user_created` DB trigger or parallel SSR requests)
+  const { data: racedProfile } = await dbClient
+    .from("users")
+    .select("*")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  if (racedProfile) {
+    return racedProfile;
+  }
+
+  throw new AuthGuardError(
+    "PROFILE_NOT_FOUND",
+    "Authenticated campus user profile could not be provisioned in public.users.",
+    403
+  );
+}
+
 /**
  * Resolves the current authenticated user strictly from server-side Supabase Auth
  * (`supabase.auth.getUser()`) together with their `public.users` profile.
@@ -81,21 +197,7 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
     );
   }
 
-  // Use `select("*")` so profile resolution works seamlessly whether migration 002
-  // (`signature_url` column) has already been applied or only migration 001 is present.
-  const { data: profile, error: profileError } = await supabase
-    .from("users")
-    .select("*")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  if (profileError || !profile) {
-    throw new AuthGuardError(
-      "PROFILE_NOT_FOUND",
-      "Authenticated campus user profile was not found in public.users.",
-      403
-    );
-  }
+  const profile = await ensureCampusUserProfile(supabase, user);
 
   const metadataPath =
     typeof user.user_metadata?.signature_storage_path === "string" &&
