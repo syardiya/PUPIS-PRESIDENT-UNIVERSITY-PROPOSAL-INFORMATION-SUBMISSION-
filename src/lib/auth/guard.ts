@@ -5,9 +5,9 @@ import { createClient } from "../supabase/server";
 import type { UserRole } from "../supabase/database.types";
 import { isAllowedInstitutionalEmail } from "./domain";
 
-const SIGNATURES_BUCKET =
+export const SIGNATURES_BUCKET =
   process.env.NEXT_PUBLIC_SIGNATURES_BUCKET || "user-signatures";
-const SIGNED_URL_TTL_SECONDS = 300; // 5-minute short-lived signed URL per Zero Trust standard
+export const SIGNED_URL_TTL_SECONDS = 300; // 5-minute short-lived signed URL per Zero Trust standard
 
 export type AuthGuardErrorCode =
   | "UNAUTHENTICATED"
@@ -40,9 +40,18 @@ export interface AuthenticatedUserProfile {
   organization_unit: string | null;
   /** Convenience alias mapped from `organization_unit` */
   organization_name: string | null;
-  /** Short-lived signed URL for user's latest saved signature (if any), never a public bucket URL */
+  /** Raw storage object path inside private `user-signatures` bucket (if configured) */
+  signature_storage_path: string | null;
+  /** Short-lived signed preview URL for the user's active signature (never a public bucket URL) */
   signature_url: string | null;
   created_at: string;
+}
+
+/**
+ * Returns true if the user holds Approver (`staff`) or `admin` privileges.
+ */
+export function isApproverOrAdminRole(role: UserRole | string): boolean {
+  return role === "staff" || role === "approver" || role === "admin";
 }
 
 /**
@@ -72,9 +81,11 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
     );
   }
 
+  // Use `select("*")` so profile resolution works seamlessly whether migration 002
+  // (`signature_url` column) has already been applied or only migration 001 is present.
   const { data: profile, error: profileError } = await supabase
     .from("users")
-    .select("id, email, full_name, organization_unit, role, created_at")
+    .select("*")
     .eq("id", user.id)
     .maybeSingle();
 
@@ -86,25 +97,36 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
     );
   }
 
-  // Resolve optional short-lived signed URL from the user's most recent signature in `proposal_signers`
-  let signatureUrl: string | null = null;
-  const { data: latestSignature } = await supabase
-    .from("proposal_signers")
-    .select("signature_storage_path")
-    .eq("approver_id", profile.id)
-    .not("signature_storage_path", "is", null)
-    .order("signed_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  const metadataPath =
+    typeof user.user_metadata?.signature_storage_path === "string" &&
+    user.user_metadata.signature_storage_path.trim() !== ""
+      ? user.user_metadata.signature_storage_path.trim()
+      : null;
 
-  if (latestSignature?.signature_storage_path) {
+  let signatureStoragePath: string | null =
+    typeof profile.signature_url === "string" && profile.signature_url.trim() !== ""
+      ? profile.signature_url.trim()
+      : metadataPath;
+
+  if (!signatureStoragePath) {
+    const { data: latestSignature } = await supabase
+      .from("proposal_signers")
+      .select("signature_storage_path")
+      .eq("approver_id", profile.id)
+      .not("signature_storage_path", "is", null)
+      .order("signed_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    signatureStoragePath = latestSignature?.signature_storage_path ?? null;
+  }
+
+  let signedPreviewUrl: string | null = null;
+  if (signatureStoragePath) {
     const { data: signedData } = await supabase.storage
       .from(SIGNATURES_BUCKET)
-      .createSignedUrl(
-        latestSignature.signature_storage_path,
-        SIGNED_URL_TTL_SECONDS
-      );
-    signatureUrl = signedData?.signedUrl ?? null;
+      .createSignedUrl(signatureStoragePath, SIGNED_URL_TTL_SECONDS);
+    signedPreviewUrl = signedData?.signedUrl ?? null;
   }
 
   return {
@@ -114,7 +136,8 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
     role: profile.role,
     organization_unit: profile.organization_unit,
     organization_name: profile.organization_unit,
-    signature_url: signatureUrl,
+    signature_storage_path: signatureStoragePath,
+    signature_url: signedPreviewUrl,
     created_at: profile.created_at,
   };
 }

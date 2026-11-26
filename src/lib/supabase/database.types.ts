@@ -40,6 +40,7 @@ export interface Database {
           full_name: string;
           organization_unit: string | null;
           role: UserRole;
+          signature_url: string | null;
           created_at: string;
         };
         Insert: {
@@ -48,6 +49,7 @@ export interface Database {
           full_name: string;
           organization_unit?: string | null;
           role?: UserRole;
+          signature_url?: string | null;
           created_at?: string;
         };
         Update: {
@@ -56,6 +58,7 @@ export interface Database {
           full_name?: string;
           organization_unit?: string | null;
           role?: UserRole;
+          signature_url?: string | null;
           created_at?: string;
         };
         Relationships: [];

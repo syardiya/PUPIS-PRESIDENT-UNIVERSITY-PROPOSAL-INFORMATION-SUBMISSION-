@@ -50,6 +50,9 @@ export async function GET(request: NextRequest) {
   const buildLoginErrorRedirect = (errorCode: string) => {
     const loginUrl = new URL("/login", requestUrl.origin);
     loginUrl.searchParams.set("error", errorCode);
+    if (nextPath !== "/dashboard") {
+      loginUrl.searchParams.set("next", nextPath);
+    }
     return NextResponse.redirect(loginUrl);
   };
 
