@@ -1,143 +1,54 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { z } from "zod";
 import { createClient } from "@/src/lib/supabase/server";
-import { buildAuthCallbackUrl } from "@/src/lib/supabase/url";
+import { isAllowedInstitutionalEmail } from "@/src/lib/auth/domain";
 import {
-  isAllowedInstitutionalEmail,
-  sanitizeRedirectPath,
-} from "@/src/lib/auth/domain";
-import {
+  AuthGuardError,
   ensureCampusUserProfile,
-  toAuthErrorResponse,
 } from "@/src/lib/auth/guard";
 
-const otpRequestSchema = z
-  .object({
-    email: z
-      .string()
-      .trim()
-      .toLowerCase()
-      .refine(isAllowedInstitutionalEmail, {
+/**
+ * Magic Link / OTP dispatch is disabled in favor of institutional Email + Password sign-in.
+ */
+export async function POST() {
+  return NextResponse.json(
+    {
+      error: {
+        code: "OTP_DISABLED",
         message:
-          "Only @student.president.ac.id and @president.ac.id emails are permitted.",
-      }),
-    next: z.string().optional(),
-  })
-  .strict();
-
-function resolveRequestOrigin(request: NextRequest): string {
-  const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0]?.trim();
-  const forwardedProto =
-    request.headers.get("x-forwarded-proto")?.split(",")[0]?.trim() || "https";
-
-  if (forwardedHost) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-
-  return request.nextUrl.origin;
-}
-
-export async function POST(request: NextRequest) {
-  let rawBody: unknown;
-  try {
-    rawBody = await request.json();
-  } catch {
-    return NextResponse.json(
-      {
-        error: {
-          code: "INVALID_JSON",
-          message: "Invalid JSON request payload.",
-        },
+          "Magic Link & OTP sign-in is disabled. Please sign in with your President University email and password.",
       },
-      { status: 400 }
-    );
-  }
-
-  const parsed = otpRequestSchema.safeParse(rawBody);
-  if (!parsed.success) {
-    const firstIssue =
-      parsed.error.issues[0]?.message ?? "Invalid campus email.";
-    return NextResponse.json(
-      {
-        error: {
-          code: "UNAUTHORIZED_DOMAIN",
-          message: firstIssue,
-        },
-      },
-      { status: 400 }
-    );
-  }
-
-  const { email, next } = parsed.data;
-  const safeNext = sanitizeRedirectPath(next);
-  const emailRedirectTo = buildAuthCallbackUrl(
-    process.env.NEXT_PUBLIC_APP_URL || resolveRequestOrigin(request)
+    },
+    { status: 410 }
   );
-
-  try {
-    const supabase = await createClient();
-    const { error } = await supabase.auth.signInWithOtp({
-      email,
-      options: {
-        shouldCreateUser: true,
-        emailRedirectTo,
-      },
-    });
-
-    if (error) {
-      return NextResponse.json(
-        {
-          error: {
-            code: "OTP_DISPATCH_FAILED",
-            message: error.message || "Unable to send campus sign-in link.",
-          },
-        },
-        { status: 400 }
-      );
-    }
-
-    const response = NextResponse.json({
-      ok: true,
-      message: `Verification link and OTP code sent to ${email}.`,
-    });
-
-    if (safeNext !== "/dashboard") {
-      response.cookies.set("pupis_auth_next", safeNext, {
-        path: "/",
-        maxAge: 600,
-        sameSite: "lax",
-        httpOnly: false,
-      });
-    }
-
-    return response;
-  } catch {
-    return NextResponse.json(
-      {
-        error: {
-          code: "AUTH_SERVICE_UNAVAILABLE",
-          message:
-            "Authentication service is not configured or temporarily unavailable.",
-        },
-      },
-      { status: 500 }
-    );
-  }
 }
 
 /**
- * Verifies domain guard and auto-provisions `public.users` on the server
- * immediately after a client-side 6-digit OTP verification (`verifyOtp`).
+ * Verifies Zero-Trust campus domain guard and idempotently initializes `public.users`
+ * using the server-side Service Role client immediately after `signInWithPassword`.
  */
-export async function PUT() {
+export async function PUT(request: NextRequest) {
   try {
     const supabase = await createClient();
-    const {
+
+    // Extract optional Bearer token in case browser cookies are still flushing right after signInWithPassword
+    const authHeader = request.headers.get("authorization") ?? "";
+    const bearerToken = authHeader.toLowerCase().startsWith("bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+
+    let {
       data: { user },
       error: authError,
     } = await supabase.auth.getUser();
 
+    if ((authError || !user) && bearerToken) {
+      const tokenResult = await supabase.auth.getUser(bearerToken);
+      user = tokenResult.data.user;
+      authError = tokenResult.error;
+    }
+
     if (authError || !user || !user.email) {
+      console.error("[PUT /api/auth/otp] Unauthenticated session:", authError);
       return NextResponse.json(
         {
           error: {
@@ -151,6 +62,10 @@ export async function PUT() {
 
     const normalizedEmail = user.email.trim().toLowerCase();
     if (!isAllowedInstitutionalEmail(normalizedEmail)) {
+      console.error(
+        "[PUT /api/auth/otp] Rejected non-campus email domain:",
+        normalizedEmail
+      );
       await supabase.auth.signOut();
       return NextResponse.json(
         {
@@ -164,12 +79,32 @@ export async function PUT() {
       );
     }
 
-    await ensureCampusUserProfile(supabase, user);
+    const profile = await ensureCampusUserProfile(supabase, user);
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({
+      ok: true,
+      profile: {
+        id: profile.id,
+        email: profile.email,
+        role: profile.role,
+      },
+    });
   } catch (error) {
-    const authErr = toAuthErrorResponse(error);
-    if (authErr) return authErr;
+    console.error("[PUT /api/auth/otp] Profile provisioning error:", error);
+
+    if (error instanceof AuthGuardError) {
+      // Return 403 strictly for unauthorized domain; surface server provisioning failures as 500 with clear message
+      const status = error.code === "UNAUTHORIZED_DOMAIN" ? 403 : 500;
+      return NextResponse.json(
+        {
+          error: {
+            code: error.code,
+            message: error.message,
+          },
+        },
+        { status }
+      );
+    }
 
     return NextResponse.json(
       {

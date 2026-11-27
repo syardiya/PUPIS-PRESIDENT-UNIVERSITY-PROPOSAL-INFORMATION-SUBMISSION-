@@ -1,5 +1,6 @@
 import React, { Suspense } from "react";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import WorkspaceShell from "@/components/WorkspaceShell";
 import { AuthGuardError, requireAuth } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
@@ -23,6 +24,8 @@ async function AuthenticatedWorkspaceContainer({
 }: {
   children: React.ReactNode;
 }) {
+  await connection();
+
   let profile;
   try {
     profile = await requireAuth();

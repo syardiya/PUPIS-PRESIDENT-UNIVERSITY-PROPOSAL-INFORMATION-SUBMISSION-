@@ -1,5 +1,6 @@
 import React, { Suspense } from "react";
 import Link from "next/link";
+import { connection } from "next/server";
 import { requireAuth, isApproverOrAdminRole } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import type { ProposalStatusDb } from "@/src/lib/supabase/database.types";
@@ -44,6 +45,7 @@ function formatIdr(amount: number): string {
 }
 
 async function DashboardDataSection() {
+  await connection();
   const profile = await requireAuth();
   const supabase = await createClient();
 
