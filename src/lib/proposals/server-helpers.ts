@@ -4,6 +4,8 @@ import {
   SIGNATURES_BUCKET,
   SIGNED_URL_TTL_SECONDS,
 } from "../auth/guard";
+import { createAdminClient } from "../supabase/admin";
+import { normalizeEnvValue } from "../supabase/url";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
   BudgetLineItemDb,
@@ -458,6 +460,15 @@ export async function fetchHydratedProposalDetail(
       ? pendingOrders[0]
       : null;
 
+  let optionalAdminStorageClient: SupabaseClient<Database> | null = null;
+  if (normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)) {
+    try {
+      optionalAdminStorageClient = createAdminClient();
+    } catch {
+      optionalAdminStorageClient = null;
+    }
+  }
+
   const [attachmentsWithUrls, signersWithUrls] = await Promise.all([
     Promise.all(
       (attachments ?? []).map(async (att) => {
@@ -465,9 +476,20 @@ export async function fetchHydratedProposalDetail(
           .from(PROPOSAL_ATTACHMENTS_BUCKET)
           .createSignedUrl(att.storage_path, ATTACHMENT_SIGNED_URL_TTL_SECONDS);
 
+        let resolvedUrl = signed?.signedUrl ?? null;
+        if (!resolvedUrl && optionalAdminStorageClient) {
+          const { data: adminSigned } = await optionalAdminStorageClient.storage
+            .from(PROPOSAL_ATTACHMENTS_BUCKET)
+            .createSignedUrl(
+              att.storage_path,
+              ATTACHMENT_SIGNED_URL_TTL_SECONDS
+            );
+          resolvedUrl = adminSigned?.signedUrl ?? null;
+        }
+
         return {
           ...att,
-          signed_url: signed?.signedUrl ?? null,
+          signed_url: resolvedUrl,
         };
       })
     ),
@@ -479,6 +501,17 @@ export async function fetchHydratedProposalDetail(
             .from(SIGNATURES_BUCKET)
             .createSignedUrl(s.signature_storage_path, SIGNED_URL_TTL_SECONDS);
           signatureSignedUrl = sigUrlData?.signedUrl ?? null;
+
+          if (!signatureSignedUrl && optionalAdminStorageClient) {
+            const { data: adminSigUrl } =
+              await optionalAdminStorageClient.storage
+                .from(SIGNATURES_BUCKET)
+                .createSignedUrl(
+                  s.signature_storage_path,
+                  SIGNED_URL_TTL_SECONDS
+                );
+            signatureSignedUrl = adminSigUrl?.signedUrl ?? null;
+          }
         }
 
         return {

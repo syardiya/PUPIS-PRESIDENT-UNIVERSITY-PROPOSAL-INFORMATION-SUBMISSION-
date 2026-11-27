@@ -150,7 +150,7 @@ export default function NotificationBellPopover({
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-label={`Notifications (${unreadCount} unread)`}
-        className="relative inline-flex items-center gap-2 rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-1.5 text-xs font-semibold text-[#0F172A] transition hover:border-slate-300 hover:bg-white focus-visible:ring-2 focus-visible:ring-[#1E3A8A] focus-visible:outline-none cursor-pointer"
+        className="relative inline-flex items-center gap-1.5 rounded-full border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs font-semibold text-[#0F172A] transition hover:border-slate-300 hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-[#1E3A8A] focus-visible:outline-none cursor-pointer"
       >
         <svg
           className="h-4 w-4 text-slate-600"

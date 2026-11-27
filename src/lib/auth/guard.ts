@@ -311,9 +311,11 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
       : null;
 
   let signatureStoragePath: string | null =
-    typeof profile.signature_url === "string" && profile.signature_url.trim() !== ""
+    metadataPath ??
+    (typeof profile.signature_url === "string" &&
+    profile.signature_url.trim() !== ""
       ? profile.signature_url.trim()
-      : metadataPath;
+      : null);
 
   if (!signatureStoragePath) {
     const { data: latestSignature } = await supabase
@@ -334,6 +336,21 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
       .from(SIGNATURES_BUCKET)
       .createSignedUrl(signatureStoragePath, SIGNED_URL_TTL_SECONDS);
     signedPreviewUrl = signedData?.signedUrl ?? null;
+
+    if (
+      !signedPreviewUrl &&
+      normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+    ) {
+      try {
+        const adminClient = createAdminClient();
+        const { data: adminSignedData } = await adminClient.storage
+          .from(SIGNATURES_BUCKET)
+          .createSignedUrl(signatureStoragePath, SIGNED_URL_TTL_SECONDS);
+        signedPreviewUrl = adminSignedData?.signedUrl ?? null;
+      } catch {
+        // Keep null if service role client cannot be initialized
+      }
+    }
   }
 
   return {

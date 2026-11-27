@@ -7,13 +7,10 @@ import { createClient } from "@/src/lib/supabase/server";
 
 function WorkspaceShellSkeleton() {
   return (
-    <div className="flex min-h-screen bg-[#F8FAFC] text-[#0F172A]">
-      <div className="hidden lg:block lg:w-68 lg:border-r lg:border-[#E2E8F0] lg:bg-white" />
-      <div className="flex flex-1 flex-col">
-        <div className="h-16 border-b border-[#E2E8F0] bg-white" />
-        <div className="flex flex-1 items-center justify-center p-8 text-xs font-medium text-slate-500">
-          Verifying President University workspace session...
-        </div>
+    <div className="flex min-h-screen flex-col bg-[#F8FAFC] text-[#0F172A]">
+      <div className="h-16 border-b border-[#E2E8F0] bg-white/95" />
+      <div className="flex flex-1 items-center justify-center p-8 text-xs font-medium text-slate-500">
+        Verifying President University workspace session...
       </div>
     </div>
   );

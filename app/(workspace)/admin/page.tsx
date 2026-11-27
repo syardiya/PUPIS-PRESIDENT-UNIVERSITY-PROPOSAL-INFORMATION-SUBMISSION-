@@ -1,6 +1,7 @@
 import React, { Suspense } from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import { AuthGuardError, requireRole } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import type { ProposalStatusDb } from "@/src/lib/supabase/database.types";
@@ -22,27 +23,32 @@ function getStatusBadge(status: ProposalStatusDb) {
       return {
         label: "Approved",
         classes: "border-emerald-200 bg-emerald-50 text-emerald-800",
+        dotClasses: "bg-emerald-600",
       };
     case "needs_revision":
       return {
-        label: "Revision Requested",
-        classes: "border-amber-200 bg-amber-50 text-amber-800",
+        label: "Needs Revision",
+        classes: "border-rose-200 bg-rose-50 text-rose-800",
+        dotClasses: "bg-rose-600",
       };
     case "rejected":
       return {
         label: "Rejected",
-        classes: "border-rose-200 bg-rose-50 text-rose-800",
+        classes: "border-rose-300 bg-rose-100/70 text-rose-900",
+        dotClasses: "bg-rose-700",
       };
     case "draft":
       return {
         label: "Draft",
-        classes: "border-slate-200 bg-slate-100 text-slate-700",
+        classes: "border-slate-300 bg-slate-100 text-slate-700",
+        dotClasses: "bg-slate-400",
       };
     case "pending_ttd":
     default:
       return {
-        label: "In Review (Pending TTD)",
+        label: "Pending TTD",
         classes: "border-[#1E3A8A]/25 bg-[#1E3A8A]/10 text-[#1E3A8A]",
+        dotClasses: "bg-[#1E3A8A]",
       };
   }
 }
@@ -66,6 +72,7 @@ async function AdminPanelSection({
     q?: string;
   }>;
 }) {
+  await connection();
   let profile;
   try {
     profile = await requireRole(["staff", "admin"]);
@@ -310,7 +317,7 @@ async function AdminPanelSection({
             </div>
             <button
               type="submit"
-              className="rounded-xl bg-[#0F172A] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A] cursor-pointer"
+              className="rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A] cursor-pointer"
             >
               Apply
             </button>
@@ -338,17 +345,22 @@ async function AdminPanelSection({
                 {proposalsList.map((prop) => {
                   const badge = getStatusBadge(prop.status);
                   return (
-                    <tr key={prop.id}>
+                    <tr key={prop.id} className="hover:bg-slate-50/70">
                       <td className="py-3.5 pr-4">
-                        <span className="font-mono text-[11px] text-slate-500">
-                          {prop.proposal_code} • v{prop.current_version}.0
-                        </span>
-                        <p className="mt-0.5 font-bold text-[#0F172A]">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-[11px] font-semibold text-slate-500">
+                            {prop.proposal_code}
+                          </span>
+                          <span className="rounded-full bg-[#0F172A] px-2 py-0.5 text-[10px] font-bold text-white">
+                            v{prop.current_version}.0
+                          </span>
+                        </div>
+                        <p className="mt-1 font-bold text-[#0F172A]">
                           {prop.title || "Untitled Proposal"}
                         </p>
                       </td>
                       <td className="py-3.5 pr-4">
-                        <p className="font-semibold text-slate-700">
+                        <p className="font-semibold text-[#1E3A8A]">
                           {prop.organization_name || "—"}
                         </p>
                         <p className="text-[11px] text-slate-500">
@@ -363,15 +375,18 @@ async function AdminPanelSection({
                       </td>
                       <td className="py-3.5 pr-4">
                         <span
-                          className={`inline-flex rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${badge.classes}`}
+                          className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${badge.classes}`}
                         >
+                          <span
+                            className={`h-1.5 w-1.5 rounded-full ${badge.dotClasses}`}
+                          />
                           {badge.label}
                         </span>
                       </td>
                       <td className="py-3.5 text-right">
                         <Link
                           href={`/proposals/${prop.id}`}
-                          className="font-semibold text-[#1E3A8A] hover:underline"
+                          className="inline-flex rounded-full border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-1 font-semibold text-[#0F172A] transition hover:border-slate-300 hover:bg-white"
                         >
                           Inspect / Print →
                         </Link>

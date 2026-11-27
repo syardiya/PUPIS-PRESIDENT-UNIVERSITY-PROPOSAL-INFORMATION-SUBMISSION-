@@ -166,18 +166,18 @@ function LoginFormContent() {
           PU
         </div>
         <h1 className="mt-4 text-2xl font-bold tracking-tight text-[#0F172A]">
-          Institutional Sign In
+          Sign in to PUPIS
         </h1>
         <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
-          Sign in with your official{" "}
+          Use your official President University institutional email (
           <span className="font-mono font-medium text-slate-700">
             @student.president.ac.id
           </span>{" "}
           or{" "}
           <span className="font-mono font-medium text-slate-700">
             @president.ac.id
-          </span>{" "}
-          email and password.
+          </span>
+          ).
         </p>
       </div>
 
@@ -215,14 +215,14 @@ function LoginFormContent() {
       )}
 
       {/* Institutional Email + Password Form */}
-      <div className="mt-6">
+      <div className="mt-7">
         <form onSubmit={handleSignIn} className="space-y-4">
           <div>
             <label
               htmlFor="campus-email"
               className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
             >
-              Institutional Email
+              Campus Email
             </label>
             <input
               id="campus-email"
@@ -356,7 +356,7 @@ export default function CampusLoginPage() {
           href="/"
           className="text-xs font-semibold text-slate-600 transition hover:text-[#0F172A]"
         >
-          ← Back to Portal
+          ← Back to Home
         </Link>
       </header>
 
