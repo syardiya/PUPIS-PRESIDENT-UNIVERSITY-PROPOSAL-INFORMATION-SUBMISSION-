@@ -2,11 +2,18 @@ import React, { Suspense } from "react";
 import Link from "next/link";
 import { connection } from "next/server";
 import { requireAuth, isApproverOrAdminRole } from "@/src/lib/auth/guard";
+import { isFacultySecretaryProfile } from "@/src/lib/proposals/approver-authority";
 import { createClient } from "@/src/lib/supabase/server";
 import type { ProposalStatusDb } from "@/src/lib/supabase/database.types";
 
 function getStatusBadge(status: ProposalStatusDb) {
   switch (status) {
+    case "completed":
+      return {
+        label: "Completed",
+        classes: "bg-emerald-100/80 text-emerald-900 border-emerald-300",
+        dotClasses: "bg-emerald-700",
+      };
     case "approved":
       return {
         label: "Approved",
@@ -79,7 +86,9 @@ async function DashboardDataSection() {
   const revisionCount = allProposals.filter(
     (p) => p.status === "needs_revision"
   ).length;
-  const approvedProposals = allProposals.filter((p) => p.status === "approved");
+  const approvedProposals = allProposals.filter(
+    (p) => p.status === "approved" || p.status === "completed"
+  );
   const approvedBudgetTotal = approvedProposals.reduce(
     (sum, p) => sum + Number(p.total_budget || 0),
     0
@@ -122,14 +131,15 @@ async function DashboardDataSection() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {!profile.signature_storage_path && (
-            <Link
-              href="/profile"
-              className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-900 transition hover:bg-amber-100"
-            >
-              <span>Configure Digital Signature (TTD) →</span>
-            </Link>
-          )}
+          {!profile.signature_storage_path &&
+            !isFacultySecretaryProfile(profile) && (
+              <Link
+                href="/profile"
+                className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-900 transition hover:bg-amber-100"
+              >
+                <span>Configure Digital Signature (TTD) →</span>
+              </Link>
+            )}
 
           {isApproverOrAdminRole(profile.role) && (
             <>
@@ -143,7 +153,13 @@ async function DashboardDataSection() {
                 href="/approvals"
                 className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A]"
               >
-                <span>Open Approval Queue</span>
+                <span>
+                  {isFacultySecretaryProfile(profile)
+                    ? "Open Secretary Intake Queue"
+                    : profile.functional_role === "student_affairs"
+                    ? "Open Final Signature Queue"
+                    : "Open Approval Queue"}
+                </span>
               </Link>
             </>
           )}
@@ -160,7 +176,7 @@ async function DashboardDataSection() {
             {allProposals.length}
           </p>
           <p className="mt-1 text-[11px] text-slate-400">
-            Scoped by PostgreSQL RLS
+            Based on your campus role
           </p>
         </div>
 

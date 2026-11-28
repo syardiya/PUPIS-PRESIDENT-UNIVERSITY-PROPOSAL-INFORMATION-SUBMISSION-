@@ -326,8 +326,8 @@ function LoginFormContent() {
       {/* Domain Security Notice */}
       <div className="mt-6 border-t border-[#E2E8F0] pt-4 text-center">
         <p className="text-[11px] leading-relaxed text-slate-400">
-          Protected by President University Zero-Trust Domain Guard. Non-campus
-          accounts are automatically rejected.
+          Restricted to official President University student and staff email
+          accounts.
         </p>
       </div>
     </div>

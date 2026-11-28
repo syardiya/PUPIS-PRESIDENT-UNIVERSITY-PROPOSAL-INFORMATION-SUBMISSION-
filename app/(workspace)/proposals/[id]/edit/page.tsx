@@ -2,9 +2,12 @@ import React, { Suspense } from "react";
 import { notFound, redirect } from "next/navigation";
 import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
+import { createAdminClient } from "@/src/lib/supabase/admin";
 import { createClient } from "@/src/lib/supabase/server";
+import { normalizeEnvValue } from "@/src/lib/supabase/url";
 import { uuidSchema } from "@/src/lib/validations/proposal";
 import { fetchHydratedProposalDetail } from "@/src/lib/proposals/server-helpers";
+import { formatFunctionalAuthorityLabel } from "@/src/lib/proposals/approver-authority";
 import ProposalCreationWizard, {
   type InitialWizardProposalData,
 } from "@/components/ProposalCreationWizard";
@@ -24,14 +27,17 @@ async function EditProposalLoader({
   }
 
   const supabase = await createClient();
+  const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+    ? createAdminClient()
+    : supabase;
   const [detail, { data: directoryUsers }] = await Promise.all([
-    fetchHydratedProposalDetail(supabase, parsedId.data),
-    supabase
+    fetchHydratedProposalDetail(dbClient, parsedId.data),
+    dbClient
       .from("users")
-      .select("id, email, full_name, organization_unit, role")
+      .select("id, email, full_name, organization_unit, role, functional_role")
       .order("role", { ascending: true })
       .order("full_name", { ascending: true })
-      .limit(50),
+      .limit(80),
   ]);
 
   if (!detail) {
@@ -49,7 +55,12 @@ async function EditProposalLoader({
 
   const latestRevisionEntry = [...detail.revision_logs]
     .reverse()
-    .find((log) => log.action_type === "revision_requested" && log.note);
+    .find(
+      (log) =>
+        (log.action_type === "revision_requested" ||
+          log.action_type === "clarification_requested") &&
+        log.note
+    );
 
   const initialProposalData: InitialWizardProposalData = {
     id: detail.id,
@@ -74,6 +85,9 @@ async function EditProposalLoader({
       email: s.approver?.email ?? "unknown@president.ac.id",
       full_name: s.approver?.full_name ?? "Campus Approver",
       role_title: s.role_title,
+      authority_label: s.approver
+        ? formatFunctionalAuthorityLabel(s.approver)
+        : "Institutional Approver",
       step_order: s.step_order,
       status: s.status,
     })),

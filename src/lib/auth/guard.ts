@@ -5,7 +5,11 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/src/lib/supabase/server";
 import { createAdminClient } from "@/src/lib/supabase/admin";
 import { normalizeEnvValue } from "@/src/lib/supabase/url";
-import type { Database, UserRole } from "@/src/lib/supabase/database.types";
+import type {
+  Database,
+  FunctionalRoleDb,
+  UserRole,
+} from "@/src/lib/supabase/database.types";
 import {
   extractEmailDomain,
   isAllowedInstitutionalEmail,
@@ -44,6 +48,8 @@ export interface AuthenticatedUserProfile {
   email: string;
   full_name: string;
   role: UserRole;
+  /** Optional institutional sub-role from `public.users.functional_role` (migration 005) */
+  functional_role: FunctionalRoleDb | null;
   /** Canonical column from `public.users` */
   organization_unit: string | null;
   /** Convenience alias mapped from `organization_unit` */
@@ -358,6 +364,7 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
     email: profile.email,
     full_name: profile.full_name,
     role: profile.role,
+    functional_role: profile.functional_role ?? null,
     organization_unit: profile.organization_unit,
     organization_name: profile.organization_unit,
     signature_storage_path: signatureStoragePath,

@@ -309,7 +309,7 @@ export default function ProfileSignatureClient({
     if (file.type !== "image/png" || !file.name.toLowerCase().endsWith(".png")) {
       setSignatureFeedback({
         type: "error",
-        message: "Only transparent PNG images (image/png) are accepted.",
+        message: "Only transparent PNG signature files (.png) are accepted.",
       });
       e.target.value = "";
       return;
@@ -465,15 +465,14 @@ export default function ProfileSignatureClient({
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E2E8F0] pb-4">
           <div>
             <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
-              Zero-Trust Private Storage
+              Campus Digital Signature
             </span>
             <h2 className="mt-1 text-lg font-bold text-[#0F172A]">
               Official Digital Signature (TTD)
             </h2>
             <p className="mt-0.5 text-xs text-slate-500">
-              Stored privately in{" "}
-              <span className="font-mono text-slate-700">user-signatures</span>{" "}
-              and served strictly via short-lived signed URLs.
+              Saved securely to your campus profile for official proposal
+              sign-offs.
             </p>
           </div>
 
@@ -500,8 +499,8 @@ export default function ProfileSignatureClient({
               Active Signature Preview (Transparency Check)
             </span>
             {activeStoragePath && (
-              <span className="max-w-[260px] truncate font-mono text-[11px] text-slate-400">
-                {activeStoragePath}
+              <span className="text-[11px] font-medium text-slate-500">
+                Saved on profile
               </span>
             )}
           </div>
@@ -652,8 +651,7 @@ export default function ProfileSignatureClient({
                     : "Click to choose a transparent PNG signature"}
                 </span>
                 <span className="mt-1 text-[11px] text-slate-500">
-                  Strictly PNG format (image/png) • Maximum 2 MB • Server
-                  magic-byte verified
+                  Transparent PNG format (.png) • Maximum 2 MB
                 </span>
                 <input
                   id="signature-png-upload"

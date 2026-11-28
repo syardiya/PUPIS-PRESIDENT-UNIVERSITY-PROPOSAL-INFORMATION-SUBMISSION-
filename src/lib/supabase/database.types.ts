@@ -8,12 +8,26 @@ export type Json =
 
 export type UserRole = "student" | "staff" | "admin";
 
+export type FunctionalRoleDb =
+  | "faculty_secretary"
+  | "kaprodi"
+  | "faculty_advisor"
+  | "student_affairs"
+  | "organization_rep";
+
+export type SecretaryReviewStatusDb =
+  | "not_started"
+  | "pending_review"
+  | "clarification_needed"
+  | "forwarded";
+
 export type ProposalStatusDb =
   | "draft"
   | "pending_ttd"
   | "needs_revision"
   | "approved"
-  | "rejected";
+  | "rejected"
+  | "completed";
 
 export type SignerStatusDb =
   | "pending"
@@ -28,7 +42,10 @@ export type RevisionActionTypeDb =
   | "signed"
   | "rejected"
   | "revision_requested"
-  | "resubmitted";
+  | "resubmitted"
+  | "clarification_requested"
+  | "forwarded"
+  | "completed";
 
 export type AttachmentKindDb = "primary_proposal_pdf" | "supporting";
 
@@ -52,6 +69,7 @@ export interface Database {
           full_name: string;
           organization_unit: string | null;
           role: UserRole;
+          functional_role: FunctionalRoleDb | null;
           signature_url: string | null;
           created_at: string;
         };
@@ -61,6 +79,7 @@ export interface Database {
           full_name: string;
           organization_unit?: string | null;
           role?: UserRole;
+          functional_role?: FunctionalRoleDb | null;
           signature_url?: string | null;
           created_at?: string;
         };
@@ -70,6 +89,7 @@ export interface Database {
           full_name?: string;
           organization_unit?: string | null;
           role?: UserRole;
+          functional_role?: FunctionalRoleDb | null;
           signature_url?: string | null;
           created_at?: string;
         };
@@ -94,6 +114,17 @@ export interface Database {
           total_budget: number;
           status: ProposalStatusDb;
           current_version: number;
+          submitted_at: string | null;
+          secretary_review_status: SecretaryReviewStatusDb;
+          secretary_reviewed_by: string | null;
+          secretary_reviewed_at: string | null;
+          secretary_review_note: string | null;
+          final_signed_by: string | null;
+          final_signature_type: SignatureTypeDb | null;
+          final_signature_path: string | null;
+          final_verification_code: string | null;
+          final_signed_at: string | null;
+          final_signature_note: string | null;
           created_at: string;
           updated_at: string;
         };
@@ -115,6 +146,17 @@ export interface Database {
           total_budget?: number;
           status?: ProposalStatusDb;
           current_version?: number;
+          submitted_at?: string | null;
+          secretary_review_status?: SecretaryReviewStatusDb;
+          secretary_reviewed_by?: string | null;
+          secretary_reviewed_at?: string | null;
+          secretary_review_note?: string | null;
+          final_signed_by?: string | null;
+          final_signature_type?: SignatureTypeDb | null;
+          final_signature_path?: string | null;
+          final_verification_code?: string | null;
+          final_signed_at?: string | null;
+          final_signature_note?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -136,6 +178,17 @@ export interface Database {
           total_budget?: number;
           status?: ProposalStatusDb;
           current_version?: number;
+          submitted_at?: string | null;
+          secretary_review_status?: SecretaryReviewStatusDb;
+          secretary_reviewed_by?: string | null;
+          secretary_reviewed_at?: string | null;
+          secretary_review_note?: string | null;
+          final_signed_by?: string | null;
+          final_signature_type?: SignatureTypeDb | null;
+          final_signature_path?: string | null;
+          final_verification_code?: string | null;
+          final_signed_at?: string | null;
+          final_signature_note?: string | null;
           created_at?: string;
           updated_at?: string;
         };
@@ -143,6 +196,20 @@ export interface Database {
           {
             foreignKeyName: "proposals_submitter_id_fkey";
             columns: ["submitter_id"];
+            isOneToOne: false;
+            referencedRelation: "users";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "proposals_secretary_reviewed_by_fkey";
+            columns: ["secretary_reviewed_by"];
+            isOneToOne: false;
+            referencedRelation: "users";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "proposals_final_signed_by_fkey";
+            columns: ["final_signed_by"];
             isOneToOne: false;
             referencedRelation: "users";
             referencedColumns: ["id"];
@@ -415,6 +482,14 @@ export interface Database {
     Views: Record<string, never>;
     Functions: {
       is_admin: {
+        Args: { p_user_id?: string };
+        Returns: boolean;
+      };
+      is_faculty_secretary: {
+        Args: { p_user_id?: string };
+        Returns: boolean;
+      };
+      is_student_affairs: {
         Args: { p_user_id?: string };
         Returns: boolean;
       };

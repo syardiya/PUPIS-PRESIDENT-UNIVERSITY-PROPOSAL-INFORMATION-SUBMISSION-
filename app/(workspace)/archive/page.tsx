@@ -31,7 +31,9 @@ async function ArchiveSection({
   const params = await searchParamsPromise;
 
   const decisionFilter =
-    params.decision === "approved" || params.decision === "rejected"
+    params.decision === "completed" ||
+    params.decision === "approved" ||
+    params.decision === "rejected"
       ? params.decision
       : "all";
   const categoryFilter = params.category?.trim() ?? "";
@@ -50,10 +52,14 @@ async function ArchiveSection({
     )
     .order("updated_at", { ascending: false });
 
-  if (decisionFilter === "approved" || decisionFilter === "rejected") {
+  if (
+    decisionFilter === "completed" ||
+    decisionFilter === "approved" ||
+    decisionFilter === "rejected"
+  ) {
     query = query.eq("status", decisionFilter);
   } else {
-    query = query.in("status", ["approved", "rejected"]);
+    query = query.in("status", ["completed", "approved", "rejected"]);
   }
 
   if (categoryFilter) {
@@ -77,13 +83,15 @@ async function ArchiveSection({
       supabase
         .from("proposals")
         .select("status, total_budget")
-        .in("status", ["approved", "rejected"]),
+        .in("status", ["completed", "approved", "rejected"]),
     ]);
 
   const list = filteredProposals ?? [];
   const summaryRows = allDecidedSummary ?? [];
   const totalDecided = summaryRows.length;
-  const approvedRows = summaryRows.filter((r) => r.status === "approved");
+  const approvedRows = summaryRows.filter(
+    (r) => r.status === "approved" || r.status === "completed"
+  );
   const rejectedCount = summaryRows.filter((r) => r.status === "rejected").length;
   const approvedBudgetSum = approvedRows.reduce(
     (acc, r) => acc + Number(r.total_budget || 0),
@@ -194,7 +202,8 @@ async function ArchiveSection({
               className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
             >
               <option value="all">All Decided</option>
-              <option value="approved">Approved Only</option>
+              <option value="completed">Completed</option>
+              <option value="approved">Approved</option>
               <option value="rejected">Rejected Only</option>
             </select>
           </div>
@@ -285,19 +294,27 @@ async function ArchiveSection({
 
                   <span
                     className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${
-                      item.status === "approved"
+                      item.status === "completed"
+                        ? "border-emerald-300 bg-emerald-100/80 text-emerald-900"
+                        : item.status === "approved"
                         ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                         : "border-rose-300 bg-rose-100/70 text-rose-900"
                     }`}
                   >
                     <span
                       className={`h-1.5 w-1.5 rounded-full ${
-                        item.status === "approved"
+                        item.status === "completed"
+                          ? "bg-emerald-700"
+                          : item.status === "approved"
                           ? "bg-emerald-600"
                           : "bg-rose-700"
                       }`}
                     />
-                    {item.status === "approved" ? "Approved" : "Rejected"}
+                    {item.status === "completed"
+                      ? "Completed"
+                      : item.status === "approved"
+                      ? "Approved"
+                      : "Rejected"}
                   </span>
                 </div>
 
