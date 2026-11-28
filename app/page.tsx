@@ -5,7 +5,7 @@ const WORKFLOW_STEPS = [
     step: "01",
     title: "Structured Submission",
     description:
-      "Student organizations complete a guided 4-step proposal wizard with event details, budget summary, PDF attachment, and separated TTD signers and CC observers.",
+      "Student organizations complete a guided 5-step proposal wizard with event details, itemized RAB budget, PDF attachment, and separated TTD signers and CC observers.",
   },
   {
     step: "02",

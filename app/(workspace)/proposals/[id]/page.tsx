@@ -1,6 +1,7 @@
 import React, { Suspense } from "react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import type {
@@ -18,27 +19,32 @@ function getStatusBadge(status: ProposalStatusDb) {
       return {
         label: "Approved",
         classes: "bg-emerald-50 text-emerald-800 border-emerald-200",
+        dotClasses: "bg-emerald-600",
       };
     case "needs_revision":
       return {
-        label: "Revision Requested",
-        classes: "bg-amber-50 text-amber-800 border-amber-200",
+        label: "Needs Revision",
+        classes: "bg-rose-50 text-rose-800 border-rose-200",
+        dotClasses: "bg-rose-600",
       };
     case "rejected":
       return {
         label: "Rejected",
-        classes: "bg-rose-50 text-rose-800 border-rose-200",
+        classes: "bg-rose-100/70 text-rose-900 border-rose-300",
+        dotClasses: "bg-rose-700",
       };
     case "draft":
       return {
         label: "Draft",
-        classes: "bg-slate-100 text-slate-700 border-slate-200",
+        classes: "bg-slate-100 text-slate-700 border-slate-300",
+        dotClasses: "bg-slate-400",
       };
     case "pending_ttd":
     default:
       return {
-        label: "In Review (Pending TTD)",
+        label: "Pending TTD",
         classes: "bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/25",
+        dotClasses: "bg-[#1E3A8A]",
       };
   }
 }
@@ -120,6 +126,7 @@ async function ProposalDetailSection({
   paramsPromise: Promise<{ id: string }>;
   searchParamsPromise: Promise<{ submitted?: string }>;
 }) {
+  await connection();
   const profile = await requireAuth();
   const [{ id }, query] = await Promise.all([
     paramsPromise,
@@ -181,6 +188,11 @@ async function ProposalDetailSection({
           .find((l) => l.action_type === "rejected" && l.note)
       : null;
 
+  const isCcOnlyObserver =
+    detail.cc_users.some((c) => c.stakeholder_id === profile.id) &&
+    detail.submitter_id !== profile.id &&
+    !detail.signers.some((s) => s.approver_id === profile.id);
+
   return (
     <div className="print-sheet-container mx-auto max-w-6xl space-y-6 px-4 py-8 sm:px-6 lg:px-8">
       {/* Official Print-Only Institutional Letterhead */}
@@ -239,37 +251,67 @@ async function ProposalDetailSection({
         </div>
       )}
 
-      {/* Highlighted Revision Requested Banner */}
+      {/* Highlighted Revision Requested Banner (Prototype Style) */}
       {detail.status === "needs_revision" && latestRevisionRequest && (
-        <div className="print-avoid-break rounded-2xl border border-amber-300 bg-gradient-to-r from-amber-50 via-rose-50/40 to-amber-50 p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <span className="text-xs font-bold uppercase tracking-wider text-amber-900">
-              Revision Requested by{" "}
-              {latestRevisionRequest.actor?.full_name ?? "Approver"}
-              {latestRevisionRequest.step_order
-                ? ` (Step ${latestRevisionRequest.step_order} • ${
-                    latestRevisionRequest.role_title ?? "Approver"
-                  })`
-                : ""}
-            </span>
-            <span className="font-mono text-xs text-amber-800">
+        <div className="print-avoid-break rounded-2xl border border-rose-300 bg-gradient-to-r from-rose-50 via-amber-50/60 to-rose-50 p-5 shadow-2xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-rose-600 text-xs font-bold text-white">
+                !
+              </span>
+              <span className="text-xs font-bold uppercase tracking-wider text-rose-800">
+                Revision Requested by{" "}
+                {latestRevisionRequest.actor?.full_name ?? "Approver"}
+                {latestRevisionRequest.step_order
+                  ? ` (Step ${latestRevisionRequest.step_order} • ${
+                      latestRevisionRequest.role_title ?? "Approver"
+                    })`
+                  : ""}
+              </span>
+            </div>
+            <span className="font-mono text-xs text-rose-700">
               {formatDateTime(latestRevisionRequest.created_at)}
             </span>
           </div>
-          <blockquote className="mt-2 rounded-xl border border-amber-200 bg-white/90 p-3.5 text-sm font-semibold text-slate-900">
+          <blockquote className="mt-2.5 rounded-xl border border-rose-200/80 bg-white/90 p-3.5 text-sm font-semibold text-slate-900">
             &ldquo;{latestRevisionRequest.note}&rdquo;
           </blockquote>
-          {canEdit && (
-            <div className="no-print mt-3 flex justify-end">
+          <div className="mt-3.5 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-xs text-slate-600">
+              {canEdit
+                ? `Edit this proposal and resubmit as v${
+                    detail.current_version + 1
+                  }.0. Previously approved TTD steps remain valid.`
+                : `Awaiting revised v${
+                    detail.current_version + 1
+                  }.0 submission from ${
+                    detail.submitter?.email ?? "submitter"
+                  }.`}
+            </p>
+            {canEdit && (
               <Link
                 href={`/proposals/${detail.id}/edit`}
-                className="rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white hover:bg-[#1E3A8A]"
+                className="no-print inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A]"
               >
-                Open Wizard to Revise &amp; Resubmit (v
-                {detail.current_version + 1}.0) →
+                Edit &amp; Resubmit (v{detail.current_version} → v
+                {detail.current_version + 1}) →
               </Link>
-            </div>
-          )}
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* CC Stakeholder Read-Only Banner (Prototype Style) */}
+      {isCcOnlyObserver && (
+        <div className="no-print flex items-center justify-between gap-3 rounded-2xl border border-indigo-200 bg-indigo-50/60 px-4 py-3 text-xs text-indigo-950">
+          <div>
+            <span className="font-bold">CC Observer Access:</span> You have
+            read-only visibility into signature progress and version change
+            logs.
+          </div>
+          <span className="shrink-0 rounded-full border border-indigo-200 bg-white px-2.5 py-0.5 font-semibold text-indigo-800">
+            Read-Only
+          </span>
         </div>
       )}
 
@@ -337,8 +379,11 @@ async function ProposalDetailSection({
                 v{detail.current_version}.0
               </span>
               <span
-                className={`inline-flex items-center rounded-full border px-3 py-0.5 text-xs font-semibold ${badge.classes}`}
+                className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-0.5 text-xs font-semibold ${badge.classes}`}
               >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${badge.dotClasses}`}
+                />
                 {badge.label}
               </span>
               {detail.activity_type && (
@@ -851,33 +896,67 @@ async function ProposalDetailSection({
                     </span>
                   </div>
 
-                  {/* Signature Graphic Area */}
-                  <div className="my-3 flex h-20 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white px-3 py-2">
-                    {isSigned ? (
-                      signer.signature_type !== "stamp" &&
-                      signer.signature_signed_url ? (
-                        /* eslint-disable-next-line @next/next/no-img-element */
+                  {/* Signature Graphic Area (Prototype Style) */}
+                  <div className="my-3">
+                    {isSigned &&
+                    signer.signature_type !== "stamp" &&
+                    signer.signature_signed_url ? (
+                      <div className="flex h-28 flex-col items-center justify-center rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-2">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
                           src={signer.signature_signed_url}
                           alt={`Digital signature of ${
                             signer.approver?.full_name ?? "Approver"
                           }`}
-                          className="max-h-16 max-w-full object-contain"
+                          className="max-h-20 max-w-full object-contain"
                         />
-                      ) : (
-                        <div className="text-center">
-                          <span className="inline-block rounded-full bg-[#0F172A] px-2.5 py-0.5 text-[10px] font-bold tracking-wider text-white">
-                            PRESIDENT UNIVERSITY
+                        <span className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                          Hand-Drawn Digital TTD
+                        </span>
+                      </div>
+                    ) : isSigned ? (
+                      <div className="flex h-28 flex-col justify-between rounded-xl border border-[#1E3A8A]/30 bg-gradient-to-br from-[#F8FAFC] via-white to-[#1E3A8A]/[0.05] p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-emerald-800">
+                            ✓ Official Digital Stamp
                           </span>
-                          <p className="mt-1 text-[11px] font-bold text-emerald-800">
-                            ✓ Official Institutional Stamp
+                          <span className="flex h-6 w-6 items-center justify-center rounded-md bg-[#0F172A] text-[9px] font-bold text-white">
+                            PU
+                          </span>
+                        </div>
+                        <div>
+                          <p className="truncate text-xs font-bold text-[#0F172A]">
+                            {signer.approver?.full_name ?? "Campus Approver"}
+                          </p>
+                          <p className="truncate font-mono text-[10px] text-[#1E3A8A]">
+                            {signer.approver?.email ?? "—"}
                           </p>
                         </div>
-                      )
+                      </div>
+                    ) : signer.status === "revision_requested" ? (
+                      <div className="flex h-28 flex-col items-center justify-center rounded-xl border border-dashed border-rose-300 bg-white/70 p-3 text-center">
+                        <span className="text-xs font-bold text-rose-700">
+                          Revision Requested
+                        </span>
+                        <span className="mt-0.5 text-[11px] text-slate-500">
+                          Awaiting resubmission before TTD sign-off
+                        </span>
+                      </div>
+                    ) : signer.status === "rejected" ? (
+                      <div className="flex h-28 flex-col items-center justify-center rounded-xl border border-dashed border-rose-300 bg-rose-50/40 p-3 text-center">
+                        <span className="text-xs font-bold text-rose-800">
+                          Proposal Rejected
+                        </span>
+                      </div>
                     ) : (
-                      <span className="text-[11px] font-medium text-slate-400">
-                        Awaiting Digital TTD
-                      </span>
+                      <div className="flex h-28 flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-3 text-center">
+                        <span className="text-xs font-semibold text-slate-400">
+                          Awaiting Digital TTD
+                        </span>
+                        <span className="mt-0.5 font-mono text-[10px] text-slate-400">
+                          {signer.approver?.email ?? "—"}
+                        </span>
+                      </div>
                     )}
                   </div>
 

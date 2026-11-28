@@ -1,5 +1,6 @@
 import React, { Suspense } from "react";
 import { notFound, redirect } from "next/navigation";
+import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import { uuidSchema } from "@/src/lib/validations/proposal";
@@ -13,6 +14,7 @@ async function EditProposalLoader({
 }: {
   paramsPromise: Promise<{ id: string }>;
 }) {
+  await connection();
   const profile = await requireAuth();
   const { id } = await paramsPromise;
 

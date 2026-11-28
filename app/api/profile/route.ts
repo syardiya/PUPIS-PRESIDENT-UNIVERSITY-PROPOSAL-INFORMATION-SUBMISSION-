@@ -2,6 +2,8 @@ import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, toAuthErrorResponse } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
+import { createAdminClient } from "@/src/lib/supabase/admin";
+import { normalizeEnvValue } from "@/src/lib/supabase/url";
 import { profileUpdateSchema } from "@/src/lib/validations/profile";
 
 export async function PATCH(request: NextRequest) {
@@ -40,9 +42,12 @@ export async function PATCH(request: NextRequest) {
 
     const { full_name, organization_unit } = parsed.data;
     const supabase = await createClient();
+    const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+      ? createAdminClient()
+      : supabase;
 
     // Update strictly `full_name` and `organization_unit` scoped to authenticated user's own `id`
-    const { data: updatedUser, error: updateError } = await supabase
+    const { data: updatedUser, error: updateError } = await dbClient
       .from("users")
       .update({
         full_name,

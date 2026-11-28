@@ -1,9 +1,11 @@
 import React, { Suspense } from "react";
+import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import ProposalCreationWizard from "@/components/ProposalCreationWizard";
 
 async function NewProposalLoader() {
+  await connection();
   const profile = await requireAuth();
   const supabase = await createClient();
 

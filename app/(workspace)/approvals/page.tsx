@@ -1,5 +1,6 @@
 import React, { Suspense } from "react";
 import Link from "next/link";
+import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import {
@@ -58,30 +59,35 @@ function getSignerDecisionBadge(item: ApprovalQueueItem) {
     return {
       label: `Your Active Turn • Step ${item.my_step_order}`,
       classes: "border-[#1E3A8A]/30 bg-[#1E3A8A]/10 text-[#1E3A8A]",
+      dotClasses: "bg-[#1E3A8A] animate-pulse",
     };
   }
   if (item.my_signer_status === "signed") {
     return {
       label: "Approved & Signed",
       classes: "border-emerald-200 bg-emerald-50 text-emerald-800",
+      dotClasses: "bg-emerald-600",
     };
   }
   if (item.my_signer_status === "revision_requested") {
     return {
-      label: "Revision Requested",
-      classes: "border-amber-200 bg-amber-50 text-amber-800",
+      label: "Needs Revision",
+      classes: "border-rose-200 bg-rose-50 text-rose-800",
+      dotClasses: "bg-rose-600",
     };
   }
   if (item.my_signer_status === "rejected") {
     return {
       label: "Rejected",
-      classes: "border-rose-200 bg-rose-50 text-rose-800",
+      classes: "border-rose-300 bg-rose-100/70 text-rose-900",
+      dotClasses: "bg-rose-700",
     };
   }
   if (item.proposal_status === "needs_revision") {
     return {
       label: "With Submitter for Revision",
-      classes: "border-amber-200 bg-amber-50 text-amber-800",
+      classes: "border-rose-200 bg-rose-50 text-rose-800",
+      dotClasses: "bg-rose-600",
     };
   }
   return {
@@ -89,6 +95,7 @@ function getSignerDecisionBadge(item: ApprovalQueueItem) {
       ? `Waiting on Step ${item.active_step_order}`
       : "Queued",
     classes: "border-slate-200 bg-slate-100 text-slate-700",
+    dotClasses: "bg-slate-400",
   };
 }
 
@@ -97,6 +104,7 @@ async function ApprovalQueueSection({
 }: {
   searchParamsPromise: Promise<{ filter?: string }>;
 }) {
+  await connection();
   const profile = await requireAuth();
   const resolvedParams = await searchParamsPromise;
 
@@ -234,7 +242,7 @@ async function ApprovalQueueSection({
             </p>
           </div>
         ) : (
-          <div className="mt-2 divide-y divide-slate-100">
+          <div className="mt-4 space-y-3.5">
             {items.map((item) => {
               const badge = getSignerDecisionBadge(item);
               const isActionRequired = item.queue_bucket === "action_required";
@@ -242,9 +250,13 @@ async function ApprovalQueueSection({
               return (
                 <div
                   key={item.signer_row_id}
-                  className="flex flex-wrap items-center justify-between gap-4 py-5"
+                  className={`rounded-2xl border p-5 transition ${
+                    isActionRequired
+                      ? "border-[#1E3A8A] bg-[#0F172A]/[0.015] ring-2 ring-[#1E3A8A]/15"
+                      : "border-[#E2E8F0] bg-white hover:border-slate-300"
+                  }`}
                 >
-                  <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-mono text-xs font-bold text-slate-500">
                         {item.proposal_code}
@@ -256,29 +268,43 @@ async function ApprovalQueueSection({
                         Step {item.my_step_order} of {item.total_steps} •{" "}
                         {item.my_role_title}
                       </span>
-                      <span
-                        className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${badge.classes}`}
-                      >
-                        {badge.label}
-                      </span>
                     </div>
 
-                    <h2 className="mt-1.5 text-base font-bold text-[#0F172A]">
-                      {item.title}
-                    </h2>
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${badge.classes}`}
+                    >
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${badge.dotClasses}`}
+                      />
+                      {badge.label}
+                    </span>
+                  </div>
 
-                    <p className="mt-1 text-xs text-slate-600">
-                      <span className="font-semibold text-[#1E3A8A]">
-                        {item.organization_name}
-                      </span>{" "}
-                      • Submitter:{" "}
-                      {item.submitter
-                        ? `${item.submitter.full_name} (${item.submitter.email})`
-                        : item.person_in_charge}{" "}
-                      • Event: {item.event_date}
-                    </p>
+                  <p className="mt-2 text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
+                    {item.organization_name}
+                  </p>
+                  <h2 className="mt-0.5 text-base font-bold text-[#0F172A]">
+                    {item.title}
+                  </h2>
 
-                    <div className="mt-1.5 flex flex-wrap items-center gap-4 text-xs text-slate-500">
+                  {item.my_decision_note && (
+                    <div className="mt-2.5 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2 text-xs text-slate-700">
+                      <strong className="text-[#0F172A]">Your Note:</strong>{" "}
+                      {item.my_decision_note}
+                    </div>
+                  )}
+
+                  <div className="mt-3.5 flex flex-wrap items-center justify-between gap-4 border-t border-slate-100 pt-3">
+                    <div className="flex flex-wrap items-center gap-4 text-xs text-slate-500">
+                      <span>
+                        Submitter:{" "}
+                        <strong className="font-medium text-slate-700">
+                          {item.submitter
+                            ? `${item.submitter.full_name} (${item.submitter.email})`
+                            : item.person_in_charge}
+                        </strong>
+                      </span>
+                      <span>Event: {item.event_date}</span>
                       <span>
                         Budget:{" "}
                         <strong className="text-[#0F172A]">
@@ -286,7 +312,7 @@ async function ApprovalQueueSection({
                         </strong>
                       </span>
                       <span>
-                        Chain Progress:{" "}
+                        TTD:{" "}
                         <strong className="text-[#0F172A]">
                           {item.signed_steps_count}/{item.total_steps} Signed
                         </strong>
@@ -297,24 +323,15 @@ async function ApprovalQueueSection({
                         </span>
                       )}
                       {item.my_verification_code && (
-                        <span className="font-mono text-[11px] text-emerald-800">
+                        <span className="font-mono text-[11px] font-semibold text-emerald-800">
                           {item.my_verification_code}
                         </span>
                       )}
                     </div>
 
-                    {item.my_decision_note && (
-                      <p className="mt-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3 py-2 text-xs text-slate-700">
-                        <strong className="text-[#0F172A]">Your Note:</strong>{" "}
-                        {item.my_decision_note}
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="shrink-0">
                     <Link
                       href={`/proposals/${item.proposal_id}`}
-                      className={`inline-flex items-center gap-1.5 rounded-full px-5 py-2.5 text-xs font-semibold transition ${
+                      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-5 py-2 text-xs font-semibold transition ${
                         isActionRequired
                           ? "bg-[#0F172A] text-white shadow-xs hover:bg-[#1E3A8A]"
                           : "border border-[#E2E8F0] bg-[#F8FAFC] text-[#0F172A] hover:border-slate-300 hover:bg-white"
@@ -322,7 +339,7 @@ async function ApprovalQueueSection({
                     >
                       <span>
                         {isActionRequired
-                          ? "Review & Sign →"
+                          ? "Approve & Sign →"
                           : "View Proposal →"}
                       </span>
                     </Link>
