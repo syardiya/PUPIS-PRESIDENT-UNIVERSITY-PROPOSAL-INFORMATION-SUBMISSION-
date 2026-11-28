@@ -60,7 +60,8 @@ export type ApprovalDecisionBodyInput = z.infer<
 
 /**
  * Server-side eligibility & turn-order validation schema verifying:
- * 1. Proposal is actively in `'pending_ttd'` review state.
+ * 0. Caller is NOT a Faculty Secretary (PBI-05 strictly forbids direct approve/reject).
+ * 1. Proposal is actively in `'pending_ttd'` review state and has cleared Faculty Secretary intake if pending.
  * 2. Caller is an assigned signer on the proposal.
  * 3. Caller's step has `'pending'` status and is the lowest pending `step_order`.
  * 4. When `action === 'approve'`, caller has a saved digital signature in `public.users.signature_url`.
@@ -68,7 +69,9 @@ export type ApprovalDecisionBodyInput = z.infer<
 export const signerTurnEligibilitySchema = z
   .object({
     action: approvalActionEnum,
+    is_faculty_secretary: z.boolean().default(false),
     proposal_status: z.string(),
+    secretary_review_status: z.string().optional(),
     is_assigned_signer: z.boolean(),
     signer_status: z.string().nullable(),
     is_lowest_pending_step: z.boolean(),
@@ -76,11 +79,34 @@ export const signerTurnEligibilitySchema = z
   })
   .strict()
   .superRefine((ctxData, ctx) => {
+    if (ctxData.is_faculty_secretary) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["is_faculty_secretary"],
+        message:
+          "Faculty Secretary accounts manage proposal intake, clarification follow-up, and forwarding, and cannot directly approve or reject proposals.",
+      });
+      return;
+    }
+
     if (ctxData.proposal_status !== "pending_ttd") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["proposal_status"],
         message: `This proposal is currently in '${ctxData.proposal_status}' status and is not awaiting TTD decisions.`,
+      });
+      return;
+    }
+
+    if (
+      ctxData.secretary_review_status === "pending_review" ||
+      ctxData.secretary_review_status === "clarification_needed"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["secretary_review_status"],
+        message:
+          "This proposal is awaiting Faculty Secretary intake verification and forwarding before sequential TTD decisions can be recorded.",
       });
       return;
     }
@@ -128,3 +154,92 @@ export const approvalQueueFilterSchema = z
   .default("action_required");
 
 export type ApprovalQueueFilter = z.infer<typeof approvalQueueFilterSchema>;
+
+// ============================================================================
+// PBI-05: FACULTY SECRETARY INTAKE & FORWARDING SCHEMAS (`.strict()`)
+// ============================================================================
+
+export const secretaryIntakeActionEnum = z.enum([
+  "forward",
+  "request_clarification",
+]);
+
+export type SecretaryIntakeActionType = z.infer<
+  typeof secretaryIntakeActionEnum
+>;
+
+/**
+ * Strict request schema for `POST /api/proposals/[id]/secretary-review` (PBI-05).
+ * Only permits `forward` (to Step 1 Approver / Kaprodi) or `request_clarification`
+ * (unlocking submitter follow-up). Explicitly excludes `approve` and `reject`.
+ */
+export const secretaryReviewBodySchema = z
+  .object({
+    action: secretaryIntakeActionEnum,
+    notes: z
+      .string()
+      .transform((val) => stripControlChars(val).trim())
+      .pipe(
+        z
+          .string()
+          .max(
+            MAX_DECISION_NOTE_LENGTH,
+            `Intake notes cannot exceed ${MAX_DECISION_NOTE_LENGTH} characters.`
+          )
+      )
+      .optional(),
+  })
+  .strict()
+  .superRefine((data, ctx) => {
+    if (data.action === "request_clarification") {
+      const len = data.notes?.trim().length ?? 0;
+      if (len < MIN_DECISION_NOTE_LENGTH) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["notes"],
+          message: `Clarification / follow-up instructions are required (minimum ${MIN_DECISION_NOTE_LENGTH} characters) so the student organization knows which documents or details to complete.`,
+        });
+      }
+    }
+  });
+
+export type SecretaryReviewBodyInput = z.infer<
+  typeof secretaryReviewBodySchema
+>;
+
+export const secretaryQueueFilterSchema = z
+  .enum(["all", "pending_review", "clarification_needed", "forwarded"])
+  .default("pending_review");
+
+export type SecretaryQueueFilter = z.infer<typeof secretaryQueueFilterSchema>;
+
+// ============================================================================
+// STUDENT AFFAIRS FINAL SIGNATURE SCHEMAS (`.strict()`)
+// ============================================================================
+
+export const finalSignatureBodySchema = z
+  .object({
+    notes: z
+      .string()
+      .transform((val) => stripControlChars(val).trim())
+      .pipe(
+        z
+          .string()
+          .max(
+            MAX_DECISION_NOTE_LENGTH,
+            `Final signature notes cannot exceed ${MAX_DECISION_NOTE_LENGTH} characters.`
+          )
+      )
+      .optional(),
+  })
+  .strict();
+
+export type FinalSignatureBodyInput = z.infer<typeof finalSignatureBodySchema>;
+
+export const studentAffairsQueueFilterSchema = z
+  .enum(["all", "awaiting_signature", "completed"])
+  .default("awaiting_signature");
+
+export type StudentAffairsQueueFilter = z.infer<
+  typeof studentAffairsQueueFilterSchema
+>;

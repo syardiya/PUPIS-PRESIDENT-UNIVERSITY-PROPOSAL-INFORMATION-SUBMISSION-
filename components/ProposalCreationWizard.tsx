@@ -10,10 +10,16 @@ import {
 import type {
   AttachmentKindDb,
   BudgetLineItemDb,
+  FunctionalRoleDb,
   ProposalStatusDb,
   SignerStatusDb,
   UserRole,
 } from "@/src/lib/supabase/database.types";
+import {
+  canBeAssignedAsApprover,
+  formatFunctionalAuthorityLabel,
+  suggestApproverRoleTitle,
+} from "@/src/lib/proposals/approver-authority";
 
 export interface DirectoryCampusUser {
   id: string;
@@ -21,6 +27,7 @@ export interface DirectoryCampusUser {
   full_name: string;
   organization_unit: string | null;
   role: UserRole;
+  functional_role?: FunctionalRoleDb | null;
 }
 
 export interface WizardSignerRow {
@@ -28,6 +35,7 @@ export interface WizardSignerRow {
   email: string;
   full_name: string;
   role_title: string;
+  authority_label?: string;
   step_order: number;
   status: SignerStatusDb;
 }
@@ -112,10 +120,9 @@ const RAB_CATEGORIES = [
 ] as const;
 
 const ROLE_TITLE_PRESETS = [
-  "PUMA / PUFA Chairperson",
-  "BEM Executive Reviewer",
   "Faculty Advisor",
-  "Head of Study Program",
+  "Head of Study Program (Kaprodi)",
+  "Dean of Faculty",
   "Directorate of Student Affairs",
   "Vice Rector III — Student & Alumni",
 ] as const;
@@ -221,12 +228,29 @@ export default function ProposalCreationWizard({
     initialDirectoryUsers
   );
   const [directorySearch, setDirectorySearch] = useState<string>("");
+  const [isSearchingDirectory, setIsSearchingDirectory] =
+    useState<boolean>(false);
   const [selectedApproverId, setSelectedApproverId] = useState<string>("");
   const [selectedRoleTitle, setSelectedRoleTitle] = useState<string>(
-    ROLE_TITLE_PRESETS[2]
+    ROLE_TITLE_PRESETS[0]
   );
   const [selectedCcId, setSelectedCcId] = useState<string>("");
   const [routingError, setRoutingError] = useState<string>("");
+
+  const knownUsersRef = useRef<Map<string, DirectoryCampusUser>>(new Map());
+  useEffect(() => {
+    for (const u of initialDirectoryUsers) {
+      knownUsersRef.current.set(u.id, u);
+    }
+    for (const u of directoryUsers) {
+      knownUsersRef.current.set(u.id, u);
+    }
+  }, [initialDirectoryUsers, directoryUsers]);
+
+  const eligibleApproverUsers = useMemo(
+    () => directoryUsers.filter((u) => canBeAssignedAsApprover(u).allowed),
+    [directoryUsers]
+  );
 
   // Step 5: Supporting Attachments & Final Submit
   const [attachments, setAttachments] = useState<WizardAttachmentRow[]>(
@@ -475,32 +499,69 @@ export default function ProposalCreationWizard({
     };
   }, [serializedDraft, hasMeaningfulInput, persistDraftNow]);
 
-  // Live directory search when user types in Step 4 filter
+  // Live directory load & search when user types in Step 4 filter (or if initial directory was empty)
   useEffect(() => {
     const trimmed = directorySearch.trim();
-    if (trimmed === "") {
+    if (trimmed === "" && initialDirectoryUsers.length > 0) {
       return;
     }
 
+    let cancelled = false;
+    const delayMs = trimmed === "" ? 0 : 250;
+
     const timer = window.setTimeout(async () => {
+      setIsSearchingDirectory(true);
       try {
-        const res = await fetch(
-          `/api/users/directory?q=${encodeURIComponent(trimmed)}`
-        );
+        const endpoint =
+          trimmed === ""
+            ? "/api/users/directory"
+            : `/api/users/directory?q=${encodeURIComponent(trimmed)}`;
+        const res = await fetch(endpoint);
         const json = (await res.json()) as {
           ok?: boolean;
           users?: DirectoryCampusUser[];
+          error?: { message?: string };
         };
+        if (cancelled) return;
+
         if (res.ok && json.ok && json.users) {
+          for (const u of json.users) {
+            knownUsersRef.current.set(u.id, u);
+          }
           setDirectoryUsers(json.users);
+
+          if (trimmed !== "") {
+            const matchingApprovers = json.users.filter(
+              (u) => canBeAssignedAsApprover(u).allowed
+            );
+            if (matchingApprovers.length === 1) {
+              setSelectedApproverId(matchingApprovers[0].id);
+              setSelectedRoleTitle(
+                suggestApproverRoleTitle(matchingApprovers[0])
+              );
+            }
+          }
+        } else if (!res.ok) {
+          setRoutingError(
+            json.error?.message ?? "Unable to search campus user directory."
+          );
         }
       } catch {
-        // Keep current directory list on transient error
+        if (!cancelled) {
+          setRoutingError("Network error while searching campus directory.");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSearchingDirectory(false);
+        }
       }
-    }, 300);
+    }, delayMs);
 
-    return () => window.clearTimeout(timer);
-  }, [directorySearch]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [directorySearch, initialDirectoryUsers]);
 
   // Step 3 RAB Handlers
   const updateBudgetRow = (
@@ -553,8 +614,24 @@ export default function ProposalCreationWizard({
       return;
     }
 
-    const foundUser = directoryUsers.find((u) => u.id === selectedApproverId);
-    if (!foundUser) return;
+    const foundUser =
+      knownUsersRef.current.get(selectedApproverId) ??
+      directoryUsers.find((u) => u.id === selectedApproverId);
+    if (!foundUser) {
+      setRoutingError(
+        "Selected approver could not be resolved. Please choose an approver from the dropdown."
+      );
+      return;
+    }
+
+    const authorityCheck = canBeAssignedAsApprover(foundUser);
+    if (!authorityCheck.allowed) {
+      setRoutingError(
+        authorityCheck.reason ??
+          "Selected account is not authorized to act as an official proposal approver."
+      );
+      return;
+    }
 
     const nextStep = signers.length + 1;
     setSigners([
@@ -564,6 +641,7 @@ export default function ProposalCreationWizard({
         email: foundUser.email,
         full_name: foundUser.full_name,
         role_title: selectedRoleTitle.trim(),
+        authority_label: formatFunctionalAuthorityLabel(foundUser),
         step_order: nextStep,
         status: "pending",
       },
@@ -612,14 +690,26 @@ export default function ProposalCreationWizard({
 
   const handleAddCc = () => {
     setRoutingError("");
-    if (!selectedCcId) return;
+    if (!selectedCcId) {
+      setRoutingError(
+        "Please select a registered campus user from the CC observer dropdown."
+      );
+      return;
+    }
     if (ccUsers.some((c) => c.stakeholder_id === selectedCcId)) {
       setRoutingError("This stakeholder is already in the CC observer list.");
       return;
     }
 
-    const found = directoryUsers.find((u) => u.id === selectedCcId);
-    if (!found) return;
+    const found =
+      knownUsersRef.current.get(selectedCcId) ??
+      directoryUsers.find((u) => u.id === selectedCcId);
+    if (!found) {
+      setRoutingError(
+        "Selected CC recipient could not be resolved. Please choose from the dropdown."
+      );
+      return;
+    }
 
     setCcUsers([
       ...ccUsers,
@@ -777,65 +867,70 @@ export default function ProposalCreationWizard({
   };
 
   return (
-    <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-      {/* Sticky Top Control & Auto-Save Bar */}
-      <div className="sticky top-16 z-20 mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#E2E8F0] bg-white/95 px-5 py-4 shadow-xs backdrop-blur-md">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2.5">
-            <span className="rounded-full bg-[#0F172A] px-3 py-0.5 text-[11px] font-bold text-white">
-              {isResubmission
-                ? `Revision v${currentVersion} → v${currentVersion + 1}`
-                : "Draft Proposal"}
-            </span>
-            <span className="font-mono text-xs font-semibold text-slate-500">
-              {proposalCode}
-            </span>
-
-            {/* Auto-Save Visual Status Pill */}
-            {autoSaveStatus === "saving" && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-[#1E3A8A]">
-                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#1E3A8A]" />
-                Saving draft...
-              </span>
-            )}
-            {autoSaveStatus === "dirty" && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800">
-                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-                Unsaved changes...
-              </span>
-            )}
-            {autoSaveStatus === "saved" && (
-              <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-800">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-600" />
-                All changes saved
-                {lastSavedTimeLabel ? ` (${lastSavedTimeLabel})` : ""}
-              </span>
-            )}
-            {autoSaveStatus === "error" && (
-              <span className="inline-flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-800">
-                <span>Save error: {autoSaveError || "Failed"}</span>
-                <button
-                  type="button"
-                  onClick={() => void persistDraftNow()}
-                  className="underline hover:text-rose-950 cursor-pointer"
-                >
-                  Retry
-                </button>
-              </span>
-            )}
+    <div className="mx-auto max-w-5xl px-4 py-6 sm:px-6 lg:px-8">
+      {/* Prototype Floating Top Bar with Cancel, Save as draft, and Primary Navy Pill */}
+      <div className="sticky top-20 z-20 mb-8 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#E2E8F0] bg-white/95 px-5 py-4 shadow-sm backdrop-blur-md">
+        <div className="flex min-w-0 items-center gap-3.5">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#0F172A] text-xs font-bold tracking-wider text-white">
+            PU
           </div>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <span className="rounded-full bg-[#0F172A] px-3 py-0.5 text-xs font-bold text-white">
+                {isResubmission
+                  ? `Resubmitting v${currentVersion} → v${currentVersion + 1}`
+                  : "New Proposal"}
+              </span>
+              <span className="font-mono text-xs font-semibold text-slate-500">
+                {proposalCode}
+              </span>
 
-          <h1 className="mt-1 truncate text-base font-bold text-[#0F172A] sm:text-lg">
-            {title.trim() || "Untitled Student Organization Proposal"}
-          </h1>
+              {/* Auto-Save Visual Status Pill */}
+              {autoSaveStatus === "saving" && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-[#1E3A8A]">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#1E3A8A]" />
+                  Saving draft...
+                </span>
+              )}
+              {autoSaveStatus === "dirty" && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-semibold text-amber-800">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  Unsaved changes...
+                </span>
+              )}
+              {autoSaveStatus === "saved" && (
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-800">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-600" />
+                  All changes saved
+                  {lastSavedTimeLabel ? ` (${lastSavedTimeLabel})` : ""}
+                </span>
+              )}
+              {autoSaveStatus === "error" && (
+                <span className="inline-flex items-center gap-2 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-0.5 text-[11px] font-semibold text-rose-800">
+                  <span>Save error: {autoSaveError || "Failed"}</span>
+                  <button
+                    type="button"
+                    onClick={() => void persistDraftNow()}
+                    className="underline hover:text-rose-950 cursor-pointer"
+                  >
+                    Retry
+                  </button>
+                </span>
+              )}
+            </div>
+
+            <h1 className="mt-1 truncate text-base font-bold text-[#0F172A] sm:text-lg">
+              {title.trim() || "Untitled Student Organization Proposal"}
+            </h1>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
           <Link
             href="/proposals"
-            className="rounded-full border border-[#E2E8F0] bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50"
+            className="rounded-full border border-[#E2E8F0] bg-white px-4 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-100"
           >
-            Back to Proposals
+            Cancel
           </Link>
           <button
             type="button"
@@ -843,42 +938,86 @@ export default function ProposalCreationWizard({
             onClick={() => void persistDraftNow()}
             className="rounded-full border border-[#1E3A8A]/30 bg-[#1E3A8A]/5 px-4 py-2 text-xs font-semibold text-[#1E3A8A] transition hover:bg-[#1E3A8A]/10 disabled:opacity-50 cursor-pointer"
           >
-            Save Draft Now
+            Save as draft
           </button>
-          <button
-            type="button"
-            onClick={() => setActiveStep(5)}
-            className="rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white shadow-2xs transition hover:bg-[#1E3A8A] cursor-pointer"
-          >
-            Review &amp; Submit →
-          </button>
+          {activeStep < 5 ? (
+            <button
+              type="button"
+              onClick={() => setActiveStep(5)}
+              className="inline-flex items-center gap-1.5 rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
+            >
+              <span>Review &amp; Submit</span>
+              <span>→</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={isSubmitting || !currentUser.has_signature}
+              onClick={() => void handleFinalSubmit()}
+              className="inline-flex items-center gap-1.5 rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-50 cursor-pointer"
+            >
+              <span>
+                {isSubmitting
+                  ? "Submitting..."
+                  : isResubmission
+                  ? `Submit Revised (v${currentVersion + 1}.0)`
+                  : "Submit Proposal"}
+              </span>
+              <svg
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2.5}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M5 13l4 4L19 7"
+                />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Revision Requested Banner */}
+      {/* Revision Requested Alert Banner (Prototype Style) */}
       {isResubmission && initialProposal?.latest_revision_note && (
-        <div className="mb-6 rounded-2xl border border-rose-300 bg-gradient-to-r from-rose-50 via-amber-50/60 to-rose-50 p-5">
-          <p className="text-xs font-bold uppercase tracking-wider text-rose-800">
-            Revision Requested by {initialProposal.latest_revision_note.actor_name}
-          </p>
-          <p className="mt-1.5 text-sm font-semibold text-slate-900">
-            &ldquo;{initialProposal.latest_revision_note.note}&rdquo;
-          </p>
-          <p className="mt-1 text-xs text-slate-600">
-            Update the necessary sections below and submit as v
-            {currentVersion + 1}.0. Previously signed TTD approvals remain
-            intact.
-          </p>
+        <div className="mb-8 rounded-2xl border border-rose-300 bg-gradient-to-r from-rose-50 via-amber-50/70 to-rose-50 p-5 shadow-xs">
+          <div className="flex items-start gap-3.5">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-rose-600 text-sm font-bold text-white">
+              !
+            </span>
+            <div className="flex-1">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-bold uppercase tracking-wider text-rose-800">
+                  Action Required • Revision Requested by{" "}
+                  {initialProposal.latest_revision_note.actor_name}
+                </span>
+                <span className="font-mono text-xs text-rose-700">
+                  {initialProposal.latest_revision_note.created_at}
+                </span>
+              </div>
+              <p className="mt-1.5 text-sm font-semibold text-slate-900">
+                &ldquo;{initialProposal.latest_revision_note.note}&rdquo;
+              </p>
+              <p className="mt-2 text-xs text-slate-600">
+                Update the necessary sections below and submit as{" "}
+                <strong>v{currentVersion + 1}.0</strong>. Previously signed TTD
+                approvals remain intact and do not need to re-sign.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Horizontal 5-Step Progress Stepper */}
+      {/* Horizontal 5-Node Progress Stepper (Prototype Style) */}
       <nav
         aria-label="Proposal Creation Steps"
-        className="mb-6 rounded-2xl border border-[#E2E8F0] bg-white p-4 shadow-2xs"
+        className="mb-8 rounded-2xl border border-[#E2E8F0] bg-white p-5 shadow-2xs"
       >
-        <ol className="grid grid-cols-1 gap-2 sm:grid-cols-5">
-          {WIZARD_STEPS.map((node) => {
+        <ol className="grid grid-cols-1 gap-3 sm:grid-cols-5">
+          {WIZARD_STEPS.map((node, index) => {
             const isCurrent = activeStep === node.step;
             const isPassed = activeStep > node.step;
 
@@ -887,14 +1026,14 @@ export default function ProposalCreationWizard({
                 <button
                   type="button"
                   onClick={() => setActiveStep(node.step)}
-                  className={`flex w-full items-center gap-3 rounded-xl p-2.5 text-left transition cursor-pointer ${
+                  className={`group flex w-full items-center gap-3 rounded-xl p-2.5 text-left transition cursor-pointer ${
                     isCurrent
                       ? "bg-[#0F172A]/[0.04] ring-1 ring-[#1E3A8A]/30"
                       : "hover:bg-slate-50"
                   }`}
                 >
                   <span
-                    className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold transition ${
                       isCurrent
                         ? "bg-[#0F172A] text-white ring-4 ring-[#1E3A8A]/15"
                         : isPassed
@@ -904,14 +1043,23 @@ export default function ProposalCreationWizard({
                   >
                     {isPassed ? "✓" : node.step}
                   </span>
-                  <div className="min-w-0">
-                    <p className="truncate text-xs font-bold text-[#0F172A]">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                      Step {node.step} of 5
+                    </p>
+                    <p
+                      className={`truncate text-xs font-bold ${
+                        isCurrent || isPassed
+                          ? "text-[#0F172A]"
+                          : "text-slate-500"
+                      }`}
+                    >
                       {node.title}
                     </p>
-                    <p className="truncate text-[11px] text-slate-500">
-                      {node.short}
-                    </p>
                   </div>
+                  {index < WIZARD_STEPS.length - 1 && (
+                    <span className="hidden text-slate-300 xl:inline">→</span>
+                  )}
                 </button>
               </li>
             );
@@ -919,974 +1067,1320 @@ export default function ProposalCreationWizard({
         </ol>
       </nav>
 
-      {/* STEP 1: GENERAL INFO & SCHEDULE */}
-      {activeStep === 1 && (
-        <section className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs sm:p-8">
-          <div className="border-b border-[#E2E8F0] pb-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
-              Step 1 of 5
-            </span>
-            <h2 className="mt-1 text-lg font-bold text-[#0F172A]">
-              General Information &amp; Event Schedule
-            </h2>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Provide core institutional details, activity classification,
-              dates, and campus venue.
-            </p>
-          </div>
-
-          <div className="mt-6 grid grid-cols-1 gap-5 sm:grid-cols-2">
-            <div className="sm:col-span-2">
-              <label
-                htmlFor="prop-title"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+      {/* Numbered Collapsible White Accordion Cards (Prototype Style) */}
+      <div className="space-y-4">
+        {/* ACCORDION CARD 1: GENERAL INFO & SCHEDULE */}
+        <div
+          className={`rounded-2xl border bg-white transition-all duration-200 ${
+            activeStep === 1
+              ? "border-[#1E3A8A] shadow-md shadow-slate-900/5"
+              : "border-[#E2E8F0]"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setActiveStep(1)}
+            className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left cursor-pointer"
+          >
+            <div className="flex items-center gap-3.5">
+              <span
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                  activeStep === 1
+                    ? "border-[#1E3A8A] bg-[#1E3A8A]/10"
+                    : "border-slate-300 bg-white"
+                }`}
               >
-                Proposal / Event Title *
-              </label>
-              <input
-                id="prop-title"
-                type="text"
-                maxLength={200}
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="e.g., Compsphere 2026: National AI & Cybersecurity Symposium"
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="prop-category"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Activity Category *
-              </label>
-              <select
-                id="prop-category"
-                value={activityType}
-                onChange={(e) => setActivityType(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              >
-                {ACTIVITY_CATEGORIES.map((cat) => (
-                  <option key={cat} value={cat}>
-                    {cat}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="prop-org"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Student Organization / Unit *
-              </label>
-              <input
-                id="prop-org"
-                type="text"
-                maxLength={150}
-                value={organizationName}
-                onChange={(e) => setOrganizationName(e.target.value)}
-                placeholder="e.g., BEM President University / PUMA Computing"
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="prop-pic"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Person in Charge (PIC) *
-              </label>
-              <input
-                id="prop-pic"
-                type="text"
-                maxLength={150}
-                value={personInCharge}
-                onChange={(e) => setPersonInCharge(e.target.value)}
-                placeholder="Project Chairperson full name"
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="prop-venue"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Proposed Venue / Location *
-              </label>
-              <input
-                id="prop-venue"
-                type="text"
-                maxLength={200}
-                value={venue}
-                onChange={(e) => setVenue(e.target.value)}
-                placeholder="e.g., Charles Himawan Auditorium, Building A"
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="prop-start-date"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Event Start Date *
-              </label>
-              <input
-                id="prop-start-date"
-                type="date"
-                value={eventDate}
-                onChange={(e) => setEventDate(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="prop-end-date"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Event End Date (Optional for multi-day)
-              </label>
-              <input
-                id="prop-end-date"
-                type="date"
-                min={eventDate || undefined}
-                value={eventEndDate}
-                onChange={(e) => setEventEndDate(e.target.value)}
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="mt-8 flex justify-end border-t border-[#E2E8F0] pt-5">
-            <button
-              type="button"
-              onClick={() => setActiveStep(2)}
-              className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
-            >
-              <span>Next: Narrative &amp; Objectives →</span>
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* STEP 2: NARRATIVE & OBJECTIVES */}
-      {activeStep === 2 && (
-        <section className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs sm:p-8">
-          <div className="border-b border-[#E2E8F0] pb-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
-              Step 2 of 5
-            </span>
-            <h2 className="mt-1 text-lg font-bold text-[#0F172A]">
-              Program Narrative, Objectives &amp; Target Audience
-            </h2>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Explain the rationale, academic or organizational goals, and
-              expected participants.
-            </p>
-          </div>
-
-          <div className="mt-6 space-y-5">
-            <div>
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="prop-background"
-                  className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-                >
-                  Background &amp; Activity Description *
-                </label>
-                <span className="text-[11px] text-slate-400">
-                  {background.length} / 10,000
-                </span>
-              </div>
-              <textarea
-                id="prop-background"
-                rows={5}
-                maxLength={10000}
-                value={background}
-                onChange={(e) => setBackground(e.target.value)}
-                placeholder="Describe the context, theme, rundown highlights, and institutional relevance of this program..."
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm leading-relaxed text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="prop-objectives"
-                  className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-                >
-                  Key Objectives &amp; Measurable Outcomes *
-                </label>
-                <span className="text-[11px] text-slate-400">
-                  {objectives.length} / 10,000
-                </span>
-              </div>
-              <textarea
-                id="prop-objectives"
-                rows={4}
-                maxLength={10000}
-                value={objectives}
-                onChange={(e) => setObjectives(e.target.value)}
-                placeholder="List concrete learning outcomes, KPIs, or student development goals..."
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm leading-relaxed text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="prop-audience"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Target Audience &amp; Estimated Attendance *
-              </label>
-              <textarea
-                id="prop-audience"
-                rows={3}
-                maxLength={4000}
-                value={targetAudience}
-                onChange={(e) => setTargetAudience(e.target.value)}
-                placeholder="e.g., 250 undergraduate students across Faculty of Computing and external university delegates..."
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm leading-relaxed text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-          </div>
-
-          <div className="mt-8 flex items-center justify-between border-t border-[#E2E8F0] pt-5">
-            <button
-              type="button"
-              onClick={() => setActiveStep(1)}
-              className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-            >
-              ← Previous
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveStep(3)}
-              className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
-            >
-              <span>Next: Budget / RAB →</span>
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* STEP 3: BUDGET / RAB LINE ITEMS */}
-      {activeStep === 3 && (
-        <section className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs sm:p-8">
-          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#E2E8F0] pb-4">
-            <div>
-              <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
-                Step 3 of 5
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    activeStep === 1 ? "bg-[#0F172A]" : "bg-transparent"
+                  }`}
+                />
               </span>
-              <h2 className="mt-1 text-lg font-bold text-[#0F172A]">
-                Detailed Budget Plan (RAB Line Items)
-              </h2>
-              <p className="mt-0.5 text-xs text-slate-500">
-                Itemize projected expenditures. Subtotals and the grand total
-                recalculate automatically.
-              </p>
-            </div>
-
-            <div className="rounded-2xl border border-[#1E3A8A]/20 bg-[#1E3A8A]/[0.04] px-4 py-2.5 text-right">
-              <span className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                Grand Total RAB
-              </span>
-              <span className="text-lg font-bold text-[#0F172A]">
-                {formatIdr(grandTotal)}
-              </span>
-            </div>
-          </div>
-
-          <div className="mt-6 space-y-3">
-            {budgetItems.map((item, index) => (
-              <div
-                key={item.id}
-                className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4"
-              >
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="text-xs font-bold text-[#0F172A]">
-                    Line Item #{index + 1}
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
+                    1. General Information &amp; Schedule
                   </span>
-                  <div className="flex items-center gap-3">
-                    <span className="font-mono text-xs font-bold text-[#1E3A8A]">
-                      Subtotal: {formatIdr(item.subtotal)}
+                  {activityType && (
+                    <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-700">
+                      {activityType}
                     </span>
-                    {budgetItems.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveBudgetRow(item.id)}
-                        className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
-                      >
-                        Remove
-                      </button>
-                    )}
-                  </div>
+                  )}
+                </div>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Organization name, Event title, PIC, Event dates, and proposed
+                  campus venue.
+                </p>
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-semibold text-[#1E3A8A]">
+              {activeStep === 1 ? "Expanded" : "Edit Step 1"}
+            </span>
+          </button>
+
+          {activeStep === 1 && (
+            <div className="border-t border-[#E2E8F0] px-6 pt-5 pb-6">
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                <div className="sm:col-span-2">
+                  <label
+                    htmlFor="prop-title"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Proposal / Event Title *
+                  </label>
+                  <input
+                    id="prop-title"
+                    type="text"
+                    maxLength={200}
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder="e.g., Compsphere 2026: National AI & Cybersecurity Symposium"
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
                 </div>
 
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
-                  <div className="sm:col-span-3">
-                    <label className="block text-[11px] font-semibold text-slate-500">
-                      Category
-                    </label>
-                    <select
-                      value={item.category}
-                      onChange={(e) =>
-                        updateBudgetRow(item.id, { category: e.target.value })
-                      }
-                      className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                <div>
+                  <label
+                    htmlFor="prop-category"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Activity Category *
+                  </label>
+                  <select
+                    id="prop-category"
+                    value={activityType}
+                    onChange={(e) => setActivityType(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  >
+                    {ACTIVITY_CATEGORIES.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="prop-org"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Student Organization / Unit *
+                  </label>
+                  <input
+                    id="prop-org"
+                    type="text"
+                    maxLength={150}
+                    value={organizationName}
+                    onChange={(e) => setOrganizationName(e.target.value)}
+                    placeholder="e.g., BEM President University / PUMA Computing"
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="prop-pic"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Person in Charge (PIC) *
+                  </label>
+                  <input
+                    id="prop-pic"
+                    type="text"
+                    maxLength={150}
+                    value={personInCharge}
+                    onChange={(e) => setPersonInCharge(e.target.value)}
+                    placeholder="Project Chairperson full name"
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="prop-venue"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Proposed Venue / Location *
+                  </label>
+                  <input
+                    id="prop-venue"
+                    type="text"
+                    maxLength={200}
+                    value={venue}
+                    onChange={(e) => setVenue(e.target.value)}
+                    placeholder="e.g., Charles Himawan Auditorium, Building A"
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="prop-start-date"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Event Start Date *
+                  </label>
+                  <input
+                    id="prop-start-date"
+                    type="date"
+                    value={eventDate}
+                    onChange={(e) => setEventDate(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="prop-end-date"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Event End Date (Optional for multi-day)
+                  </label>
+                  <input
+                    id="prop-end-date"
+                    type="date"
+                    min={eventDate || undefined}
+                    value={eventEndDate}
+                    onChange={(e) => setEventEndDate(e.target.value)}
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-6 flex justify-end border-t border-[#E2E8F0] pt-5">
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(2)}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
+                >
+                  <span>Next: Narrative &amp; Objectives →</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ACCORDION CARD 2: NARRATIVE & OBJECTIVES */}
+        <div
+          className={`rounded-2xl border bg-white transition-all duration-200 ${
+            activeStep === 2
+              ? "border-[#1E3A8A] shadow-md shadow-slate-900/5"
+              : "border-[#E2E8F0]"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setActiveStep(2)}
+            className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left cursor-pointer"
+          >
+            <div className="flex items-center gap-3.5">
+              <span
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                  activeStep === 2
+                    ? "border-[#1E3A8A] bg-[#1E3A8A]/10"
+                    : "border-slate-300 bg-white"
+                }`}
+              >
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    activeStep === 2 ? "bg-[#0F172A]" : "bg-transparent"
+                  }`}
+                />
+              </span>
+              <div>
+                <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
+                  2. Program Narrative, Objectives &amp; Audience
+                </span>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Explain background context, measurable academic/organizational
+                  goals, and expected participants.
+                </p>
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-semibold text-[#1E3A8A]">
+              {activeStep === 2 ? "Expanded" : "Edit Step 2"}
+            </span>
+          </button>
+
+          {activeStep === 2 && (
+            <div className="border-t border-[#E2E8F0] px-6 pt-5 pb-6">
+              <div className="space-y-5">
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="prop-background"
+                      className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
                     >
-                      {RAB_CATEGORIES.map((cat) => (
-                        <option key={cat} value={cat}>
-                          {cat}
+                      Background &amp; Activity Description *
+                    </label>
+                    <span className="text-[11px] text-slate-400">
+                      {background.length} / 10,000
+                    </span>
+                  </div>
+                  <textarea
+                    id="prop-background"
+                    rows={5}
+                    maxLength={10000}
+                    value={background}
+                    onChange={(e) => setBackground(e.target.value)}
+                    placeholder="Describe the context, theme, rundown highlights, and institutional relevance of this program..."
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm leading-relaxed text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor="prop-objectives"
+                      className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                    >
+                      Key Objectives &amp; Measurable Outcomes *
+                    </label>
+                    <span className="text-[11px] text-slate-400">
+                      {objectives.length} / 10,000
+                    </span>
+                  </div>
+                  <textarea
+                    id="prop-objectives"
+                    rows={4}
+                    maxLength={10000}
+                    value={objectives}
+                    onChange={(e) => setObjectives(e.target.value)}
+                    placeholder="List concrete learning outcomes, KPIs, or student development goals..."
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm leading-relaxed text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="prop-audience"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Target Audience &amp; Estimated Attendance *
+                  </label>
+                  <textarea
+                    id="prop-audience"
+                    rows={3}
+                    maxLength={4000}
+                    value={targetAudience}
+                    onChange={(e) => setTargetAudience(e.target.value)}
+                    placeholder="e.g., 250 undergraduate students across Faculty of Computing and external university delegates..."
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm leading-relaxed text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-center justify-between border-t border-[#E2E8F0] pt-5">
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(1)}
+                  className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  ← Previous
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(3)}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
+                >
+                  <span>Next: Budget / RAB →</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ACCORDION CARD 3: BUDGET / RAB LINE ITEMS */}
+        <div
+          className={`rounded-2xl border bg-white transition-all duration-200 ${
+            activeStep === 3
+              ? "border-[#1E3A8A] shadow-md shadow-slate-900/5"
+              : "border-[#E2E8F0]"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setActiveStep(3)}
+            className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left cursor-pointer"
+          >
+            <div className="flex items-center gap-3.5">
+              <span
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                  activeStep === 3
+                    ? "border-[#1E3A8A] bg-[#1E3A8A]/10"
+                    : "border-slate-300 bg-white"
+                }`}
+              >
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    activeStep === 3 ? "bg-[#0F172A]" : "bg-transparent"
+                  }`}
+                />
+              </span>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
+                    3. Detailed Budget Plan (RAB)
+                  </span>
+                  <span className="rounded-full bg-[#1E3A8A]/10 px-2.5 py-0.5 text-[11px] font-semibold text-[#1E3A8A]">
+                    {formatIdr(grandTotal)}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Itemize projected expenditures; subtotals and grand total
+                  recalculate automatically.
+                </p>
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-semibold text-[#1E3A8A]">
+              {activeStep === 3 ? "Expanded" : "Edit Step 3"}
+            </span>
+          </button>
+
+          {activeStep === 3 && (
+            <div className="border-t border-[#E2E8F0] px-6 pt-5 pb-6">
+              <div className="space-y-3">
+                {budgetItems.map((item, index) => (
+                  <div
+                    key={item.id}
+                    className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-4"
+                  >
+                    <div className="mb-3 flex items-center justify-between">
+                      <span className="text-xs font-bold text-[#0F172A]">
+                        Line Item #{index + 1}
+                      </span>
+                      <div className="flex items-center gap-3">
+                        <span className="font-mono text-xs font-bold text-[#1E3A8A]">
+                          Subtotal: {formatIdr(item.subtotal)}
+                        </span>
+                        {budgetItems.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveBudgetRow(item.id)}
+                            className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
+                          >
+                            Remove
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-12">
+                      <div className="sm:col-span-3">
+                        <label className="block text-[11px] font-semibold text-slate-500">
+                          Category
+                        </label>
+                        <select
+                          value={item.category}
+                          onChange={(e) =>
+                            updateBudgetRow(item.id, {
+                              category: e.target.value,
+                            })
+                          }
+                          className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-medium text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                        >
+                          {RAB_CATEGORIES.map((cat) => (
+                            <option key={cat} value={cat}>
+                              {cat}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="sm:col-span-4">
+                        <label className="block text-[11px] font-semibold text-slate-500">
+                          Item Description *
+                        </label>
+                        <input
+                          type="text"
+                          maxLength={240}
+                          value={item.description}
+                          onChange={(e) =>
+                            updateBudgetRow(item.id, {
+                              description: e.target.value,
+                            })
+                          }
+                          placeholder="e.g., Auditorium Sound & LED Package"
+                          className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-2">
+                        <label className="block text-[11px] font-semibold text-slate-500">
+                          Quantity
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={item.quantity}
+                          onChange={(e) =>
+                            updateBudgetRow(item.id, {
+                              quantity: Number.parseFloat(e.target.value) || 0,
+                            })
+                          }
+                          className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-1">
+                        <label className="block text-[11px] font-semibold text-slate-500">
+                          Unit
+                        </label>
+                        <input
+                          type="text"
+                          maxLength={40}
+                          value={item.unit}
+                          onChange={(e) =>
+                            updateBudgetRow(item.id, { unit: e.target.value })
+                          }
+                          placeholder="pcs"
+                          className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-2.5 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                        />
+                      </div>
+
+                      <div className="sm:col-span-2">
+                        <label className="block text-[11px] font-semibold text-slate-500">
+                          Unit Price (IDR)
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          step="1000"
+                          value={item.unit_price}
+                          onChange={(e) =>
+                            updateBudgetRow(item.id, {
+                              unit_price:
+                                Number.parseFloat(e.target.value) || 0,
+                            })
+                          }
+                          className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-4">
+                <button
+                  type="button"
+                  onClick={handleAddBudgetRow}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-[#1E3A8A]/30 bg-[#1E3A8A]/5 px-4 py-2 text-xs font-semibold text-[#1E3A8A] transition hover:bg-[#1E3A8A]/10 cursor-pointer"
+                >
+                  <span>+ Add RAB Line Item</span>
+                </button>
+
+                <div className="text-right">
+                  <span className="text-xs text-slate-500">
+                    {budgetItems.length} item(s) • Total Requested:{" "}
+                  </span>
+                  <strong className="text-sm font-bold text-[#0F172A]">
+                    {formatIdr(grandTotal)}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="mt-6 flex items-center justify-between border-t border-[#E2E8F0] pt-5">
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(2)}
+                  className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  ← Previous
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(4)}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
+                >
+                  <span>Next: Approval Routing →</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* ACCORDION CARD 4: APPROVAL ROUTING & CC STAKEHOLDERS */}
+        <div
+          className={`rounded-2xl border bg-white transition-all duration-200 ${
+            activeStep === 4
+              ? "border-[#1E3A8A] shadow-md shadow-slate-900/5"
+              : "border-[#E2E8F0]"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setActiveStep(4)}
+            className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left cursor-pointer"
+          >
+            <div className="flex items-center gap-3.5">
+              <span
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                  activeStep === 4
+                    ? "border-[#1E3A8A] bg-[#1E3A8A]/10"
+                    : "border-slate-300 bg-white"
+                }`}
+              >
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    activeStep === 4 ? "bg-[#0F172A]" : "bg-transparent"
+                  }`}
+                />
+              </span>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
+                    4. Approvers (TTD) &amp; CC Recipients
+                  </span>
+                  <span className="rounded-full bg-[#1E3A8A]/10 px-2.5 py-0.5 text-[11px] font-semibold text-[#1E3A8A]">
+                    {signers.length} Signers • {ccUsers.length} CC
+                  </span>
+                </div>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Separate ordered sequential TTD Signers from read-only CC
+                  Stakeholders (@president.ac.id / @student.president.ac.id).
+                </p>
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-semibold text-[#1E3A8A]">
+              {activeStep === 4 ? "Expanded" : "Edit Step 4"}
+            </span>
+          </button>
+
+          {activeStep === 4 && (
+            <div className="border-t border-[#E2E8F0] px-6 pt-5 pb-6">
+              {/* Approver Authority Notice */}
+              <div className="mb-4 rounded-xl border border-[#1E3A8A]/20 bg-[#1E3A8A]/[0.04] px-4 py-3 text-xs text-slate-700">
+                <strong className="text-[#0F172A]">
+                  Official Approver Policy:
+                </strong>{" "}
+                Only authorized institutional staff and approvers (such as Head
+                of Study Program / Kaprodi and Faculty Advisors) can be assigned
+                to the sequential TTD chain. Student accounts and Faculty
+                Secretary intake officers cannot be selected as decision
+                approvers.
+              </div>
+
+              {/* Campus Directory Filter */}
+              <div>
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="directory-search"
+                    className="block text-xs font-bold uppercase tracking-wider text-slate-500"
+                  >
+                    Search Campus User Directory
+                  </label>
+                  {isSearchingDirectory && (
+                    <span className="text-[11px] font-medium text-[#1E3A8A]">
+                      Searching...
+                    </span>
+                  )}
+                </div>
+                <input
+                  id="directory-search"
+                  type="search"
+                  value={directorySearch}
+                  onChange={(e) => {
+                    const nextVal = e.target.value;
+                    setDirectorySearch(nextVal);
+                    if (
+                      nextVal.trim() === "" &&
+                      initialDirectoryUsers.length > 0
+                    ) {
+                      setDirectoryUsers(initialDirectoryUsers);
+                    }
+                  }}
+                  placeholder="Filter registered users by name, @president.ac.id email, or unit..."
+                  className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                />
+
+                {directorySearch.trim().length > 0 && (
+                  <div className="mt-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-2.5">
+                    {directoryUsers.length === 0 ? (
+                      <p className="text-xs text-slate-500">
+                        No registered campus users matched &ldquo;
+                        {directorySearch.trim()}&rdquo;.
+                      </p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {directoryUsers.slice(0, 6).map((u) => {
+                          const canApprove =
+                            canBeAssignedAsApprover(u).allowed;
+                          const alreadySigner = signers.some(
+                            (s) => s.approver_id === u.id
+                          );
+                          const alreadyCc = ccUsers.some(
+                            (c) => c.stakeholder_id === u.id
+                          );
+                          return (
+                            <div
+                              key={`match-${u.id}`}
+                              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E2E8F0] bg-white px-3 py-2 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <span className="font-bold text-[#0F172A]">
+                                  {u.full_name}
+                                </span>{" "}
+                                <span className="font-mono text-[11px] text-slate-500">
+                                  ({u.email})
+                                </span>{" "}
+                                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                                  {formatFunctionalAuthorityLabel(u)}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {canApprove && (
+                                  <button
+                                    type="button"
+                                    disabled={alreadySigner}
+                                    onClick={() => {
+                                      setRoutingError("");
+                                      const roleTitle =
+                                        suggestApproverRoleTitle(u);
+                                      setSigners((prev) =>
+                                        prev.some((s) => s.approver_id === u.id)
+                                          ? prev
+                                          : [
+                                              ...prev,
+                                              {
+                                                approver_id: u.id,
+                                                email: u.email,
+                                                full_name: u.full_name,
+                                                role_title: roleTitle,
+                                                authority_label:
+                                                  formatFunctionalAuthorityLabel(
+                                                    u
+                                                  ),
+                                                step_order: prev.length + 1,
+                                                status: "pending",
+                                              },
+                                            ]
+                                      );
+                                    }}
+                                    className="rounded-full bg-[#0F172A] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#1E3A8A] disabled:opacity-40 cursor-pointer"
+                                  >
+                                    {alreadySigner
+                                      ? "Added Approver"
+                                      : "+ Add Approver"}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={alreadyCc}
+                                  onClick={() => {
+                                    setRoutingError("");
+                                    setCcUsers((prev) =>
+                                      prev.some(
+                                        (c) => c.stakeholder_id === u.id
+                                      )
+                                        ? prev
+                                        : [
+                                            ...prev,
+                                            {
+                                              stakeholder_id: u.id,
+                                              email: u.email,
+                                              full_name: u.full_name,
+                                              organization_unit:
+                                                u.organization_unit,
+                                            },
+                                          ]
+                                    );
+                                  }}
+                                  className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1E3A8A] transition hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                                >
+                                  {alreadyCc ? "Added CC" : "+ Add CC"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {routingError && (
+                <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-semibold text-rose-700">
+                  {routingError}
+                </div>
+              )}
+
+              <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-2">
+                {/* LEFT: Ordered Signers (TTD) */}
+                <div className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-5">
+                  <div className="flex items-center justify-between">
+                    <span className="rounded-full bg-[#0F172A] px-3 py-1 text-xs font-bold text-white">
+                      Sequential TTD Approvers ({signers.length})
+                    </span>
+                    <span className="text-[11px] font-medium text-slate-500">
+                      Step 1 → Step N
+                    </span>
+                  </div>
+
+                  <div className="mt-4 space-y-2.5">
+                    {signers.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-slate-300 bg-white p-5 text-center text-xs text-slate-500">
+                        No TTD approvers assigned yet. Add at least one campus
+                        approver below.
+                      </div>
+                    ) : (
+                      signers.map((signer, idx) => (
+                        <div
+                          key={signer.approver_id}
+                          className="flex items-center justify-between gap-2 rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2.5"
+                        >
+                          <div className="flex min-w-0 items-center gap-2.5">
+                            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#0F172A] text-[11px] font-bold text-white">
+                              {idx + 1}
+                            </span>
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <p className="truncate text-xs font-bold text-[#0F172A]">
+                                  {signer.full_name}
+                                </p>
+                                <span className="rounded bg-[#1E3A8A]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#1E3A8A]">
+                                  {signer.role_title}
+                                </span>
+                                {signer.authority_label &&
+                                  signer.authority_label !==
+                                    signer.role_title && (
+                                    <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                                      {signer.authority_label}
+                                    </span>
+                                  )}
+                              </div>
+                              <p className="truncate font-mono text-[11px] text-slate-500">
+                                {signer.email}
+                              </p>
+                            </div>
+                          </div>
+
+                          {signer.status === "signed" ? (
+                            <span className="shrink-0 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700">
+                              Signed (Locked)
+                            </span>
+                          ) : (
+                            <div className="flex shrink-0 items-center gap-1">
+                              <button
+                                type="button"
+                                disabled={idx === 0}
+                                onClick={() => handleMoveSigner(idx, -1)}
+                                aria-label="Move step up"
+                                className="rounded p-1 text-xs text-slate-500 hover:bg-slate-100 disabled:opacity-30 cursor-pointer"
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                disabled={idx === signers.length - 1}
+                                onClick={() => handleMoveSigner(idx, 1)}
+                                aria-label="Move step down"
+                                className="rounded p-1 text-xs text-slate-500 hover:bg-slate-100 disabled:opacity-30 cursor-pointer"
+                              >
+                                ↓
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleRemoveSigner(signer.approver_id)
+                                }
+                                className="ml-1 text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="mt-4 space-y-2.5 border-t border-[#E2E8F0] pt-4">
+                    <p className="text-xs font-bold text-[#0F172A]">
+                      Add Official Sequential Approver
+                    </p>
+                    <select
+                      aria-label="Select campus approver"
+                      value={selectedApproverId}
+                      onChange={(e) => {
+                        const chosenId = e.target.value;
+                        setSelectedApproverId(chosenId);
+                        const chosenUser = eligibleApproverUsers.find(
+                          (u) => u.id === chosenId
+                        );
+                        if (chosenUser) {
+                          setSelectedRoleTitle(
+                            suggestApproverRoleTitle(chosenUser)
+                          );
+                        }
+                      }}
+                      className="w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                    >
+                      <option value="">
+                        — Choose authorized campus approver (
+                        {eligibleApproverUsers.length}) —
+                      </option>
+                      {eligibleApproverUsers.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.full_name} ({u.email}) •{" "}
+                          {formatFunctionalAuthorityLabel(u)}
                         </option>
                       ))}
                     </select>
-                  </div>
 
-                  <div className="sm:col-span-4">
-                    <label className="block text-[11px] font-semibold text-slate-500">
-                      Item Description *
-                    </label>
-                    <input
-                      type="text"
-                      maxLength={240}
-                      value={item.description}
-                      onChange={(e) =>
-                        updateBudgetRow(item.id, {
-                          description: e.target.value,
-                        })
-                      }
-                      placeholder="e.g., Auditorium Sound & LED Package"
-                      className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="block text-[11px] font-semibold text-slate-500">
-                      Quantity
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      step="any"
-                      value={item.quantity}
-                      onChange={(e) =>
-                        updateBudgetRow(item.id, {
-                          quantity: Number.parseFloat(e.target.value) || 0,
-                        })
-                      }
-                      className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-1">
-                    <label className="block text-[11px] font-semibold text-slate-500">
-                      Unit
-                    </label>
-                    <input
-                      type="text"
-                      maxLength={40}
-                      value={item.unit}
-                      onChange={(e) =>
-                        updateBudgetRow(item.id, { unit: e.target.value })
-                      }
-                      placeholder="pcs"
-                      className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-2.5 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
-                    />
-                  </div>
-
-                  <div className="sm:col-span-2">
-                    <label className="block text-[11px] font-semibold text-slate-500">
-                      Unit Price (IDR)
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      step="1000"
-                      value={item.unit_price}
-                      onChange={(e) =>
-                        updateBudgetRow(item.id, {
-                          unit_price: Number.parseFloat(e.target.value) || 0,
-                        })
-                      }
-                      className="mt-1 w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs font-semibold text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
-                    />
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        list="role-title-presets"
+                        value={selectedRoleTitle}
+                        onChange={(e) => setSelectedRoleTitle(e.target.value)}
+                        placeholder="Approval Role Title (e.g., Faculty Advisor)"
+                        className="flex-1 rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                      />
+                      <datalist id="role-title-presets">
+                        {ROLE_TITLE_PRESETS.map((preset) => (
+                          <option key={preset} value={preset} />
+                        ))}
+                      </datalist>
+                      <button
+                        type="button"
+                        onClick={handleAddSigner}
+                        className="rounded-full bg-[#0F172A] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A] cursor-pointer"
+                      >
+                        + Add Step
+                      </button>
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
 
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-4">
-            <button
-              type="button"
-              onClick={handleAddBudgetRow}
-              className="inline-flex items-center gap-1.5 rounded-full border border-[#1E3A8A]/30 bg-[#1E3A8A]/5 px-4 py-2 text-xs font-semibold text-[#1E3A8A] transition hover:bg-[#1E3A8A]/10 cursor-pointer"
-            >
-              <span>+ Add RAB Line Item</span>
-            </button>
-
-            <div className="text-right">
-              <span className="text-xs text-slate-500">
-                {budgetItems.length} item(s) • Total Requested:{" "}
-              </span>
-              <strong className="text-sm font-bold text-[#0F172A]">
-                {formatIdr(grandTotal)}
-              </strong>
-            </div>
-          </div>
-
-          <div className="mt-8 flex items-center justify-between border-t border-[#E2E8F0] pt-5">
-            <button
-              type="button"
-              onClick={() => setActiveStep(2)}
-              className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-            >
-              ← Previous
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveStep(4)}
-              className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
-            >
-              <span>Next: Approval Routing →</span>
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* STEP 4: APPROVAL ROUTING & CC STAKEHOLDERS */}
-      {activeStep === 4 && (
-        <section className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs sm:p-8">
-          <div className="border-b border-[#E2E8F0] pb-4">
-            <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
-              Step 4 of 5
-            </span>
-            <h2 className="mt-1 text-lg font-bold text-[#0F172A]">
-              Sequential Digital TTD Chain &amp; CC Stakeholders
-            </h2>
-            <p className="mt-0.5 text-xs text-slate-500">
-              Select registered President University accounts (
-              <span className="font-mono">@president.ac.id</span> or{" "}
-              <span className="font-mono">@student.president.ac.id</span>) in
-              the exact signing sequence.
-            </p>
-          </div>
-
-          {/* Campus Directory Filter */}
-          <div className="mt-5">
-            <label
-              htmlFor="directory-search"
-              className="block text-xs font-bold uppercase tracking-wider text-slate-500"
-            >
-              Search Campus User Directory
-            </label>
-            <input
-              id="directory-search"
-              type="search"
-              value={directorySearch}
-              onChange={(e) => setDirectorySearch(e.target.value)}
-              placeholder="Filter registered users by name, @president.ac.id email, or unit..."
-              className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-            />
-          </div>
-
-          {routingError && (
-            <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-semibold text-rose-700">
-              {routingError}
-            </div>
-          )}
-
-          <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-            {/* LEFT: Ordered Signers (TTD) */}
-            <div className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-5">
-              <div className="flex items-center justify-between">
-                <span className="rounded-full bg-[#0F172A] px-3 py-1 text-xs font-bold text-white">
-                  Sequential TTD Approvers ({signers.length})
-                </span>
-                <span className="text-[11px] font-medium text-slate-500">
-                  Step 1 → Step N
-                </span>
-              </div>
-
-              <div className="mt-4 space-y-2.5">
-                {signers.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-300 bg-white p-5 text-center text-xs text-slate-500">
-                    No TTD approvers assigned yet. Add at least one campus
-                    approver below.
+                {/* RIGHT: Read-Only CC Stakeholders */}
+                <div className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-5">
+                  <div className="flex items-center justify-between">
+                    <span className="rounded-full border border-[#1E3A8A]/30 bg-[#1E3A8A]/10 px-3 py-1 text-xs font-bold text-[#1E3A8A]">
+                      CC Stakeholders ({ccUsers.length})
+                    </span>
+                    <span className="text-[11px] font-medium text-slate-500">
+                      Read-Only Audit Copy
+                    </span>
                   </div>
-                ) : (
-                  signers.map((signer, idx) => (
-                    <div
-                      key={signer.approver_id}
-                      className="flex items-center justify-between gap-2 rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2.5"
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#0F172A] text-[11px] font-bold text-white">
-                          {idx + 1}
-                        </span>
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <p className="truncate text-xs font-bold text-[#0F172A]">
-                              {signer.full_name}
-                            </p>
-                            <span className="rounded bg-[#1E3A8A]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#1E3A8A]">
-                              {signer.role_title}
-                            </span>
-                          </div>
-                          <p className="truncate font-mono text-[11px] text-slate-500">
-                            {signer.email}
-                          </p>
-                        </div>
-                      </div>
 
-                      {signer.status === "signed" ? (
-                        <span className="shrink-0 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700">
-                          Signed (Locked)
-                        </span>
-                      ) : (
-                        <div className="flex shrink-0 items-center gap-1">
+                  <div className="mt-4 space-y-2.5">
+                    {ccUsers.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-slate-300 bg-white p-5 text-center text-xs text-slate-500">
+                        Optional: add advisors, finance, or venue coordinators
+                        as read-only CC observers.
+                      </div>
+                    ) : (
+                      ccUsers.map((cc) => (
+                        <div
+                          key={cc.stakeholder_id}
+                          className="flex items-center justify-between gap-2 rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2.5"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-bold text-[#0F172A]">
+                              {cc.full_name}
+                            </p>
+                            <p className="truncate font-mono text-[11px] text-slate-500">
+                              {cc.email}
+                            </p>
+                          </div>
                           <button
                             type="button"
-                            disabled={idx === 0}
-                            onClick={() => handleMoveSigner(idx, -1)}
-                            aria-label="Move step up"
-                            className="rounded p-1 text-xs text-slate-500 hover:bg-slate-100 disabled:opacity-30 cursor-pointer"
-                          >
-                            ↑
-                          </button>
-                          <button
-                            type="button"
-                            disabled={idx === signers.length - 1}
-                            onClick={() => handleMoveSigner(idx, 1)}
-                            aria-label="Move step down"
-                            className="rounded p-1 text-xs text-slate-500 hover:bg-slate-100 disabled:opacity-30 cursor-pointer"
-                          >
-                            ↓
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleRemoveSigner(signer.approver_id)
-                            }
-                            className="ml-1 text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
+                            onClick={() => handleRemoveCc(cc.stakeholder_id)}
+                            className="text-xs font-semibold text-slate-400 hover:text-rose-600 cursor-pointer"
                           >
                             Remove
                           </button>
                         </div>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div className="mt-4 space-y-2.5 border-t border-[#E2E8F0] pt-4">
-                <p className="text-xs font-bold text-[#0F172A]">
-                  Add Sequential Approver
-                </p>
-                <select
-                  aria-label="Select campus approver"
-                  value={selectedApproverId}
-                  onChange={(e) => setSelectedApproverId(e.target.value)}
-                  className="w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
-                >
-                  <option value="">
-                    — Choose registered campus user ({directoryUsers.length}) —
-                  </option>
-                  {directoryUsers.map((u) => (
-                    <option key={u.id} value={u.id}>
-                      {u.full_name} ({u.email}) • {u.role}
-                    </option>
-                  ))}
-                </select>
-
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    list="role-title-presets"
-                    value={selectedRoleTitle}
-                    onChange={(e) => setSelectedRoleTitle(e.target.value)}
-                    placeholder="Approval Role Title (e.g., Faculty Advisor)"
-                    className="flex-1 rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
-                  />
-                  <datalist id="role-title-presets">
-                    {ROLE_TITLE_PRESETS.map((preset) => (
-                      <option key={preset} value={preset} />
-                    ))}
-                  </datalist>
-                  <button
-                    type="button"
-                    onClick={handleAddSigner}
-                    className="rounded-full bg-[#0F172A] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A] cursor-pointer"
-                  >
-                    + Add Step
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* RIGHT: Read-Only CC Stakeholders */}
-            <div className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-5">
-              <div className="flex items-center justify-between">
-                <span className="rounded-full border border-[#1E3A8A]/30 bg-[#1E3A8A]/10 px-3 py-1 text-xs font-bold text-[#1E3A8A]">
-                  CC Stakeholders ({ccUsers.length})
-                </span>
-                <span className="text-[11px] font-medium text-slate-500">
-                  Read-Only Audit Copy
-                </span>
-              </div>
-
-              <div className="mt-4 space-y-2.5">
-                {ccUsers.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-300 bg-white p-5 text-center text-xs text-slate-500">
-                    Optional: add advisors, finance, or venue coordinators as
-                    read-only CC observers.
+                      ))
+                    )}
                   </div>
-                ) : (
-                  ccUsers.map((cc) => (
-                    <div
-                      key={cc.stakeholder_id}
-                      className="flex items-center justify-between gap-2 rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2.5"
-                    >
-                      <div className="min-w-0">
-                        <p className="truncate text-xs font-bold text-[#0F172A]">
-                          {cc.full_name}
-                        </p>
-                        <p className="truncate font-mono text-[11px] text-slate-500">
-                          {cc.email}
-                        </p>
-                      </div>
+
+                  <div className="mt-4 space-y-2 border-t border-[#E2E8F0] pt-4">
+                    <p className="text-xs font-bold text-[#0F172A]">
+                      Add Read-Only CC Observer
+                    </p>
+                    <div className="flex gap-2">
+                      <select
+                        aria-label="Select CC stakeholder"
+                        value={selectedCcId}
+                        onChange={(e) => setSelectedCcId(e.target.value)}
+                        className="flex-1 rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                      >
+                        <option value="">
+                          — Choose registered campus observer —
+                        </option>
+                        {directoryUsers.map((u) => (
+                          <option key={u.id} value={u.id}>
+                            {u.full_name} ({u.email})
+                          </option>
+                        ))}
+                      </select>
                       <button
                         type="button"
-                        onClick={() => handleRemoveCc(cc.stakeholder_id)}
-                        className="text-xs font-semibold text-slate-400 hover:text-rose-600 cursor-pointer"
+                        onClick={handleAddCc}
+                        className="rounded-full bg-[#0F172A] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A] cursor-pointer"
                       >
-                        Remove
+                        + Add CC
                       </button>
                     </div>
-                  ))
-                )}
-              </div>
-
-              <div className="mt-4 space-y-2 border-t border-[#E2E8F0] pt-4">
-                <p className="text-xs font-bold text-[#0F172A]">
-                  Add Read-Only CC Observer
-                </p>
-                <div className="flex gap-2">
-                  <select
-                    aria-label="Select CC stakeholder"
-                    value={selectedCcId}
-                    onChange={(e) => setSelectedCcId(e.target.value)}
-                    className="flex-1 rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
-                  >
-                    <option value="">
-                      — Choose registered campus observer —
-                    </option>
-                    {directoryUsers.map((u) => (
-                      <option key={u.id} value={u.id}>
-                        {u.full_name} ({u.email})
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={handleAddCc}
-                    className="rounded-full bg-[#0F172A] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A] cursor-pointer"
-                  >
-                    + Add CC
-                  </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
 
-          <div className="mt-8 flex items-center justify-between border-t border-[#E2E8F0] pt-5">
-            <button
-              type="button"
-              onClick={() => setActiveStep(3)}
-              className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-            >
-              ← Previous
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveStep(5)}
-              className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
-            >
-              <span>Next: Attachments &amp; Final Review →</span>
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* STEP 5: SUPPORTING ATTACHMENTS & FINAL REVIEW */}
-      {activeStep === 5 && (
-        <section className="space-y-6">
-          {/* Submitter Signature Readiness Check */}
-          {!currentUser.has_signature && (
-            <div className="rounded-2xl border border-amber-300 bg-amber-50 p-5">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <p className="text-xs font-bold uppercase tracking-wider text-amber-900">
-                    Digital Signature (TTD) Required Before Final Submission
-                  </p>
-                  <p className="mt-1 text-xs text-amber-800">
-                    Your draft is automatically saved, but you must configure an
-                    active PNG Digital Signature on your Profile page before
-                    submitting for institutional approval.
-                  </p>
-                </div>
-                <Link
-                  href="/profile"
-                  className="rounded-full bg-[#0F172A] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A]"
+              <div className="mt-6 flex items-center justify-between border-t border-[#E2E8F0] pt-5">
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(3)}
+                  className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
                 >
-                  Open Profile &amp; Configure TTD →
-                </Link>
+                  ← Previous
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(5)}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-6 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] cursor-pointer"
+                >
+                  <span>Next: Attachments &amp; Final Submit →</span>
+                </button>
               </div>
             </div>
           )}
+        </div>
 
-          {/* Attachments Upload & List Card */}
-          <div className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs sm:p-8">
-            <div className="border-b border-[#E2E8F0] pb-4">
-              <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
-                Step 5 of 5 • Supporting Documents
+        {/* ACCORDION CARD 5: ATTACHMENTS & FINAL SIGN/SUBMIT */}
+        <div
+          className={`rounded-2xl border bg-white transition-all duration-200 ${
+            activeStep === 5
+              ? "border-[#1E3A8A] shadow-md shadow-slate-900/5"
+              : "border-[#E2E8F0]"
+          }`}
+        >
+          <button
+            type="button"
+            onClick={() => setActiveStep(5)}
+            className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left cursor-pointer"
+          >
+            <div className="flex items-center gap-3.5">
+              <span
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${
+                  activeStep === 5
+                    ? "border-[#1E3A8A] bg-[#1E3A8A]/10"
+                    : "border-slate-300 bg-white"
+                }`}
+              >
+                <span
+                  className={`h-2.5 w-2.5 rounded-full ${
+                    activeStep === 5 ? "bg-[#0F172A]" : "bg-transparent"
+                  }`}
+                />
               </span>
-              <h2 className="mt-1 text-lg font-bold text-[#0F172A]">
-                Proposal PDF &amp; Supporting Attachments
-              </h2>
-              <p className="mt-0.5 text-xs text-slate-500">
-                Upload your formal Proposal PDF along with rundowns, vendor
-                quotations, or RAB spreadsheets (PDF, PNG, JPG, DOCX, XLSX • max
-                10 MB per file).
-              </p>
-            </div>
-
-            <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[#1E3A8A]/40 bg-[#F8FAFC] p-5 text-center transition hover:border-[#1E3A8A] hover:bg-white">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#0F172A] text-xs font-bold text-white">
-                  PDF
-                </span>
-                <span className="mt-2 text-xs font-bold text-[#0F172A]">
-                  {isUploadingFile
-                    ? "Uploading & Verifying..."
-                    : "Upload Primary Proposal PDF"}
-                </span>
-                <span className="mt-0.5 text-[11px] text-slate-500">
-                  application/pdf • Max 10 MB
-                </span>
-                <input
-                  type="file"
-                  accept="application/pdf,.pdf"
-                  disabled={isUploadingFile}
-                  onChange={(e) =>
-                    void handleAttachmentFileSelect(e, "primary_proposal_pdf")
-                  }
-                  className="sr-only"
-                />
-              </label>
-
-              <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-[#F8FAFC] p-5 text-center transition hover:border-[#1E3A8A] hover:bg-white">
-                <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-800 text-xs font-bold text-white">
-                  +
-                </span>
-                <span className="mt-2 text-xs font-bold text-[#0F172A]">
-                  {isUploadingFile
-                    ? "Uploading & Verifying..."
-                    : "Upload Supporting Attachment"}
-                </span>
-                <span className="mt-0.5 text-[11px] text-slate-500">
-                  PDF, PNG, JPG, DOCX, XLSX • Max 10 MB
-                </span>
-                <input
-                  type="file"
-                  accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx"
-                  disabled={isUploadingFile}
-                  onChange={(e) =>
-                    void handleAttachmentFileSelect(e, "supporting")
-                  }
-                  className="sr-only"
-                />
-              </label>
-            </div>
-
-            {attachmentError && (
-              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-semibold text-rose-700">
-                {attachmentError}
-              </div>
-            )}
-
-            <div className="mt-5 space-y-2.5">
-              {attachments.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-[#E2E8F0] bg-[#F8FAFC] p-6 text-center text-xs text-slate-500">
-                  No files uploaded yet. At least one document is required
-                  before final submission.
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
+                    5. Attachments &amp; Status Dispatch
+                  </span>
+                  <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-700">
+                    {attachments.length} File(s)
+                  </span>
                 </div>
-              ) : (
-                attachments.map((att) => (
-                  <div
-                    key={att.id}
-                    className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3"
-                  >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#0F172A] text-[10px] font-bold text-white">
-                        {att.file_name.split(".").pop()?.toUpperCase() || "DOC"}
-                      </span>
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="truncate text-xs font-bold text-[#0F172A]">
-                            {att.file_name}
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Upload official PDF &amp; supporting documents, review package
+                  summary, and dispatch to TTD Signers.
+                </p>
+              </div>
+            </div>
+            <span className="shrink-0 text-xs font-semibold text-[#1E3A8A]">
+              {activeStep === 5 ? "Ready to Submit" : "Preview Step 5"}
+            </span>
+          </button>
+
+          {activeStep === 5 && (
+            <div className="space-y-6 border-t border-[#E2E8F0] px-6 pt-5 pb-6">
+              {/* Submitter Signature Readiness Check */}
+              {!currentUser.has_signature && (
+                <div className="rounded-2xl border border-amber-300 bg-amber-50 p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-wider text-amber-900">
+                        Digital Signature (TTD) Required Before Final Submission
+                      </p>
+                      <p className="mt-1 text-xs text-amber-800">
+                        Your draft is automatically saved, but you must
+                        configure an active PNG Digital Signature on your
+                        Profile page before submitting for institutional
+                        approval.
+                      </p>
+                    </div>
+                    <Link
+                      href="/profile"
+                      className="rounded-full bg-[#0F172A] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A]"
+                    >
+                      Open Profile &amp; Configure TTD →
+                    </Link>
+                  </div>
+                </div>
+              )}
+
+              {/* Upload Dropzones */}
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-[#1E3A8A]/40 bg-[#F8FAFC] p-5 text-center transition hover:border-[#1E3A8A] hover:bg-white">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#0F172A] text-xs font-bold text-white">
+                    PDF
+                  </span>
+                  <span className="mt-2 text-xs font-bold text-[#0F172A]">
+                    {isUploadingFile
+                      ? "Uploading & Verifying..."
+                      : "Upload Primary Proposal PDF"}
+                  </span>
+                  <span className="mt-0.5 text-[11px] text-slate-500">
+                    PDF Document (.pdf) • Max 10 MB
+                  </span>
+                  <input
+                    type="file"
+                    accept="application/pdf,.pdf"
+                    disabled={isUploadingFile}
+                    onChange={(e) =>
+                      void handleAttachmentFileSelect(e, "primary_proposal_pdf")
+                    }
+                    className="sr-only"
+                  />
+                </label>
+
+                <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-[#F8FAFC] p-5 text-center transition hover:border-[#1E3A8A] hover:bg-white">
+                  <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-slate-800 text-xs font-bold text-white">
+                    +
+                  </span>
+                  <span className="mt-2 text-xs font-bold text-[#0F172A]">
+                    {isUploadingFile
+                      ? "Uploading & Verifying..."
+                      : "Upload Supporting Attachment"}
+                  </span>
+                  <span className="mt-0.5 text-[11px] text-slate-500">
+                    PDF, PNG, JPG, DOCX, XLSX • Max 10 MB
+                  </span>
+                  <input
+                    type="file"
+                    accept=".pdf,.png,.jpg,.jpeg,.docx,.xlsx"
+                    disabled={isUploadingFile}
+                    onChange={(e) =>
+                      void handleAttachmentFileSelect(e, "supporting")
+                    }
+                    className="sr-only"
+                  />
+                </label>
+              </div>
+
+              {attachmentError && (
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-semibold text-rose-700">
+                  {attachmentError}
+                </div>
+              )}
+
+              {/* Uploaded Files List */}
+              <div className="space-y-2.5">
+                {attachments.length === 0 ? (
+                  <div className="rounded-xl border border-dashed border-[#E2E8F0] bg-[#F8FAFC] p-5 text-center text-xs text-slate-500">
+                    No files uploaded yet. At least one document is required
+                    before final submission.
+                  </div>
+                ) : (
+                  attachments.map((att) => (
+                    <div
+                      key={att.id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-4 py-3"
+                    >
+                      <div className="flex min-w-0 items-center gap-3">
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#0F172A] text-[10px] font-bold text-white">
+                          {att.file_name.split(".").pop()?.toUpperCase() ||
+                            "DOC"}
+                        </span>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <p className="truncate text-xs font-bold text-[#0F172A]">
+                              {att.file_name}
+                            </p>
+                            {att.attachment_kind === "primary_proposal_pdf" && (
+                              <span className="rounded-full bg-[#1E3A8A]/10 px-2 py-0.5 text-[10px] font-bold text-[#1E3A8A]">
+                                Primary PDF
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-500">
+                            {formatBytes(att.file_size)} • v{att.version_number}
+                            .0
                           </p>
-                          {att.attachment_kind === "primary_proposal_pdf" && (
-                            <span className="rounded-full bg-[#1E3A8A]/10 px-2 py-0.5 text-[10px] font-bold text-[#1E3A8A]">
-                              Primary PDF
-                            </span>
-                          )}
                         </div>
-                        <p className="text-[11px] text-slate-500">
-                          {formatBytes(att.file_size)} • v{att.version_number}.0
-                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-3">
+                        {att.signed_url && (
+                          <a
+                            href={att.signed_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs font-semibold text-[#1E3A8A] hover:underline"
+                          >
+                            Preview / Download
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          disabled={deletingAttachmentId === att.id}
+                          onClick={() => void handleDeleteAttachment(att.id)}
+                          className="text-xs font-semibold text-rose-600 hover:underline disabled:opacity-50 cursor-pointer"
+                        >
+                          {deletingAttachmentId === att.id
+                            ? "Removing..."
+                            : "Remove"}
+                        </button>
                       </div>
                     </div>
+                  ))
+                )}
+              </div>
 
-                    <div className="flex items-center gap-3">
-                      {att.signed_url && (
-                        <a
-                          href={att.signed_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs font-semibold text-[#1E3A8A] hover:underline"
-                        >
-                          Preview / Download
-                        </a>
-                      )}
-                      <button
-                        type="button"
-                        disabled={deletingAttachmentId === att.id}
-                        onClick={() => void handleDeleteAttachment(att.id)}
-                        className="text-xs font-semibold text-rose-600 hover:underline disabled:opacity-50 cursor-pointer"
-                      >
-                        {deletingAttachmentId === att.id
-                          ? "Removing..."
-                          : "Remove"}
-                      </button>
-                    </div>
+              {/* Final Submission Summary Box (Prototype Style) */}
+              <div className="rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-5">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                  <div>
+                    <span className="text-[11px] font-semibold uppercase text-slate-400">
+                      Organization &amp; Title
+                    </span>
+                    <p className="mt-0.5 text-xs font-bold text-[#0F172A]">
+                      {title || "—"}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      {organizationName || "—"} • PIC: {personInCharge || "—"}
+                    </p>
                   </div>
-                ))
+                  <div>
+                    <span className="text-[11px] font-semibold uppercase text-slate-400">
+                      Schedule &amp; RAB Total
+                    </span>
+                    <p className="mt-0.5 text-xs font-bold text-[#0F172A]">
+                      {eventDate || "Date unset"}
+                      {eventEndDate ? ` → ${eventEndDate}` : ""}
+                    </p>
+                    <p className="text-xs font-semibold text-[#1E3A8A]">
+                      {formatIdr(grandTotal)} ({budgetItems.length} line items)
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-[11px] font-semibold uppercase text-slate-400">
+                      Routing &amp; Version
+                    </span>
+                    <p className="mt-0.5 text-xs font-bold text-[#0F172A]">
+                      {signers.length} Approver(s) • {ccUsers.length} CC
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Target Version: v
+                      {isResubmission ? currentVersion + 1 : currentVersion}.0
+                    </p>
+                  </div>
+                </div>
+
+                {/* Ordered Approver Authority Preview Before Submit */}
+                <div className="mt-4 border-t border-[#E2E8F0] pt-4">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Sequential Approver Order &amp; Authority Review
+                  </span>
+                  {signers.length === 0 ? (
+                    <p className="mt-1 text-xs font-semibold text-amber-800">
+                      ! Assign at least one authorized institutional approver in
+                      Step 4 before submitting.
+                    </p>
+                  ) : (
+                    <ol className="mt-2 flex flex-wrap items-center gap-2">
+                      {signers.map((s, idx) => (
+                        <li
+                          key={s.approver_id}
+                          className="inline-flex items-center gap-2 rounded-xl border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs"
+                        >
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#0F172A] text-[10px] font-bold text-white">
+                            {idx + 1}
+                          </span>
+                          <div>
+                            <span className="font-bold text-[#0F172A]">
+                              {s.full_name}
+                            </span>{" "}
+                            <span className="text-slate-500">
+                              ({s.role_title})
+                            </span>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </div>
+
+                <div className="mt-4 border-t border-[#E2E8F0] pt-4">
+                  <label
+                    htmlFor="submission-note"
+                    className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+                  >
+                    Submission / Revision Cover Note (Optional)
+                  </label>
+                  <textarea
+                    id="submission-note"
+                    rows={2}
+                    maxLength={2000}
+                    value={submissionNote}
+                    onChange={(e) => setSubmissionNote(e.target.value)}
+                    placeholder="Add any context or summary of changes for the Step 1 approver..."
+                    className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-white px-3.5 py-2.5 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {submitErrors.length > 0 && (
+                <div
+                  role="alert"
+                  className="rounded-2xl border border-rose-200 bg-rose-50 p-4"
+                >
+                  <p className="text-xs font-bold text-rose-900">
+                    Please resolve the following before submitting:
+                  </p>
+                  <ul className="mt-1.5 list-disc space-y-1 pl-4 text-xs text-rose-800">
+                    {submitErrors.map((errMsg, idx) => (
+                      <li key={idx}>{errMsg}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
-            </div>
-          </div>
 
-          {/* Final Summary & Submit Card */}
-          <div className="rounded-2xl border border-[#E2E8F0] bg-white p-6 shadow-2xs sm:p-8">
-            <h3 className="text-base font-bold text-[#0F172A]">
-              Final Submission Summary
-            </h3>
-            <div className="mt-4 grid grid-cols-1 gap-4 rounded-2xl border border-[#E2E8F0] bg-[#F8FAFC] p-5 sm:grid-cols-3">
-              <div>
-                <span className="text-[11px] font-semibold uppercase text-slate-400">
-                  Program &amp; Unit
-                </span>
-                <p className="mt-0.5 text-xs font-bold text-[#0F172A]">
-                  {title || "—"}
-                </p>
-                <p className="text-xs text-slate-500">
-                  {organizationName || "—"} • PIC: {personInCharge || "—"}
-                </p>
-              </div>
-              <div>
-                <span className="text-[11px] font-semibold uppercase text-slate-400">
-                  Schedule &amp; RAB Total
-                </span>
-                <p className="mt-0.5 text-xs font-bold text-[#0F172A]">
-                  {eventDate || "Date unset"}
-                  {eventEndDate ? ` → ${eventEndDate}` : ""}
-                </p>
-                <p className="text-xs font-semibold text-[#1E3A8A]">
-                  {formatIdr(grandTotal)} ({budgetItems.length} line items)
-                </p>
-              </div>
-              <div>
-                <span className="text-[11px] font-semibold uppercase text-slate-400">
-                  Routing &amp; Files
-                </span>
-                <p className="mt-0.5 text-xs font-bold text-[#0F172A]">
-                  {signers.length} Sequential Signer(s) • {ccUsers.length} CC
-                </p>
-                <p className="text-xs text-slate-500">
-                  {attachments.length} Attached Document(s)
-                </p>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#E2E8F0] pt-5">
+                <button
+                  type="button"
+                  onClick={() => setActiveStep(4)}
+                  className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  ← Previous
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isSubmitting || !currentUser.has_signature}
+                  onClick={() => void handleFinalSubmit()}
+                  className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-7 py-3 text-xs font-semibold text-white shadow-sm transition hover:bg-[#1E3A8A] disabled:opacity-50 cursor-pointer"
+                >
+                  <span>
+                    {isSubmitting
+                      ? "Locking & Submitting Proposal..."
+                      : isResubmission
+                      ? `Submit Revised Proposal (v${currentVersion + 1}.0)`
+                      : "Submit Proposal for Sequential TTD"}
+                  </span>
+                  <span>→</span>
+                </button>
               </div>
             </div>
-
-            <div className="mt-5">
-              <label
-                htmlFor="submission-note"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Submission / Revision Cover Note (Optional)
-              </label>
-              <textarea
-                id="submission-note"
-                rows={2}
-                maxLength={2000}
-                value={submissionNote}
-                onChange={(e) => setSubmissionNote(e.target.value)}
-                placeholder="Add any context or summary of changes for the Step 1 approver..."
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
-            </div>
-
-            {submitErrors.length > 0 && (
-              <div
-                role="alert"
-                className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4"
-              >
-                <p className="text-xs font-bold text-rose-900">
-                  Please resolve the following before submitting:
-                </p>
-                <ul className="mt-1.5 list-disc space-y-1 pl-4 text-xs text-rose-800">
-                  {submitErrors.map((errMsg, idx) => (
-                    <li key={idx}>{errMsg}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-[#E2E8F0] pt-5">
-              <button
-                type="button"
-                onClick={() => setActiveStep(4)}
-                className="rounded-full border border-[#E2E8F0] bg-white px-5 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                ← Previous
-              </button>
-
-              <button
-                type="button"
-                disabled={isSubmitting || !currentUser.has_signature}
-                onClick={() => void handleFinalSubmit()}
-                className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-7 py-3 text-xs font-semibold text-white shadow-sm transition hover:bg-[#1E3A8A] disabled:opacity-50 cursor-pointer"
-              >
-                <span>
-                  {isSubmitting
-                    ? "Locking & Submitting Proposal..."
-                    : isResubmission
-                    ? `Submit Revised Proposal (v${currentVersion + 1}.0)`
-                    : "Submit Proposal for Sequential TTD"}
-                </span>
-                <span>→</span>
-              </button>
-            </div>
-          </div>
-        </section>
-      )}
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -8,6 +8,10 @@ import {
   signerTurnEligibilitySchema,
 } from "@/src/lib/validations/approval";
 import { generateVerificationCode } from "@/src/lib/proposals/approval-helpers";
+import {
+  isFacultySecretaryProfile,
+  isStudentAffairsProfile,
+} from "@/src/lib/proposals/approver-authority";
 
 export async function POST(
   request: NextRequest,
@@ -16,6 +20,20 @@ export async function POST(
   try {
     const profile = await requireAuth();
     const { id } = await context.params;
+
+    // PBI-05 Zero-Trust Guard: Faculty Secretary strictly cannot approve, reject, or stamp TTD decisions
+    if (isFacultySecretaryProfile(profile)) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "FORBIDDEN_SECRETARY_APPROVAL",
+            message:
+              "Faculty Secretary accounts manage proposal intake, clarification follow-up, and forwarding, and are not permitted to directly approve or reject proposals.",
+          },
+        },
+        { status: 403 }
+      );
+    }
 
     const idCheck = uuidSchema.safeParse(id);
     if (!idCheck.success) {
@@ -66,7 +84,7 @@ export async function POST(
     const { data: proposal, error: propError } = await supabase
       .from("proposals")
       .select(
-        "id, proposal_code, submitter_id, title, status, current_version"
+        "id, proposal_code, submitter_id, title, status, secretary_review_status, current_version"
       )
       .eq("id", idCheck.data)
       .maybeSingle();
@@ -116,7 +134,9 @@ export async function POST(
 
     const eligibility = signerTurnEligibilitySchema.safeParse({
       action,
+      is_faculty_secretary: isFacultySecretaryProfile(profile),
       proposal_status: proposal.status,
+      secretary_review_status: proposal.secretary_review_status,
       is_assigned_signer: Boolean(userSignerRow),
       signer_status: userSignerRow?.status ?? null,
       is_lowest_pending_step: Boolean(
@@ -132,6 +152,7 @@ export async function POST(
       const issuePath = firstIssue?.path[0];
 
       const status =
+        issuePath === "is_faculty_secretary" ||
         issuePath === "is_assigned_signer"
           ? 403
           : issuePath === "has_saved_signature"
@@ -139,8 +160,12 @@ export async function POST(
           : 409;
 
       const code =
-        issuePath === "is_assigned_signer"
+        issuePath === "is_faculty_secretary"
+          ? "FORBIDDEN_SECRETARY_APPROVAL"
+          : issuePath === "is_assigned_signer"
           ? "FORBIDDEN_NOT_ASSIGNED_SIGNER"
+          : issuePath === "secretary_review_status"
+          ? "AWAITING_SECRETARY_INTAKE"
           : issuePath === "has_saved_signature"
           ? "SIGNATURE_REQUIRED"
           : "NOT_ACTIVE_SIGNER_TURN";
@@ -296,12 +321,34 @@ export async function POST(
           },
         ]);
       } else {
-        await supabase.from("notifications").insert({
-          user_id: proposal.submitter_id,
-          proposal_id: proposal.id,
-          title: `Proposal Fully Approved (${proposal.proposal_code})`,
-          message: `All sequential TTD signers have approved "${proposal.title}" (v${proposal.current_version}.0). Final signature stamped by ${profile.full_name}.`,
-        });
+        const { data: saCandidates } = await supabase
+          .from("users")
+          .select("id, email, role, functional_role, organization_unit")
+          .in("role", ["staff", "admin"]);
+
+        const studentAffairsRecipients = (saCandidates ?? []).filter(
+          (u) =>
+            isStudentAffairsProfile(u) &&
+            u.id !== profile.id &&
+            u.id !== proposal.submitter_id
+        );
+
+        const notificationRows = [
+          {
+            user_id: proposal.submitter_id,
+            proposal_id: proposal.id,
+            title: `Proposal Approved — Awaiting Final Signature (${proposal.proposal_code})`,
+            message: `All sequential approvers have approved "${proposal.title}" (v${proposal.current_version}.0), signed by ${profile.full_name}. Next step: Student Affairs Final Signature.`,
+          },
+          ...studentAffairsRecipients.map((sa) => ({
+            user_id: sa.id,
+            proposal_id: proposal.id,
+            title: `Awaiting Final Signature (${proposal.proposal_code})`,
+            message: `"${proposal.title}" (v${proposal.current_version}.0) has been approved by all sequential approvers (${profile.full_name}) and is ready for Student Affairs final signature.`,
+          })),
+        ];
+
+        await supabase.from("notifications").insert(notificationRows);
       }
 
       revalidatePath("/approvals");

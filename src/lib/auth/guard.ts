@@ -5,7 +5,11 @@ import type { SupabaseClient, User } from "@supabase/supabase-js";
 import { createClient } from "@/src/lib/supabase/server";
 import { createAdminClient } from "@/src/lib/supabase/admin";
 import { normalizeEnvValue } from "@/src/lib/supabase/url";
-import type { Database, UserRole } from "@/src/lib/supabase/database.types";
+import type {
+  Database,
+  FunctionalRoleDb,
+  UserRole,
+} from "@/src/lib/supabase/database.types";
 import {
   extractEmailDomain,
   isAllowedInstitutionalEmail,
@@ -44,6 +48,8 @@ export interface AuthenticatedUserProfile {
   email: string;
   full_name: string;
   role: UserRole;
+  /** Optional institutional sub-role from `public.users.functional_role` (migration 005) */
+  functional_role: FunctionalRoleDb | null;
   /** Canonical column from `public.users` */
   organization_unit: string | null;
   /** Convenience alias mapped from `organization_unit` */
@@ -87,6 +93,28 @@ function resolveDefaultCampusRole(email: string): UserRole {
   return domain === "president.ac.id" ? "staff" : "student";
 }
 
+function formatPostgrestDiagnostic(err: unknown): {
+  message: string;
+  code?: string;
+  details?: string | null;
+  hint?: string | null;
+} {
+  if (err && typeof err === "object") {
+    const record = err as Record<string, unknown>;
+    return {
+      message:
+        typeof record.message === "string"
+          ? record.message
+          : String(err),
+      code: typeof record.code === "string" ? record.code : undefined,
+      details:
+        typeof record.details === "string" ? record.details : null,
+      hint: typeof record.hint === "string" ? record.hint : null,
+    };
+  }
+  return { message: String(err) };
+}
+
 /**
  * Idempotently ensures an authenticated President University user
  * (`@student.president.ac.id` or `@president.ac.id`) has a corresponding row
@@ -105,67 +133,150 @@ export async function ensureCampusUserProfile(
     );
   }
 
-  const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
-    ? createAdminClient()
-    : supabase;
+  let lastFailureReason: unknown = null;
 
-  const { data: existingProfile, error: selectError } = await dbClient
+  // 1. Attempt lookup via session client first; if empty or blocked by RLS, silently fall through to adminClient
+  const { data: sessionProfile, error: sessionSelectError } = await supabase
     .from("users")
     .select("*")
     .eq("id", user.id)
     .maybeSingle();
 
-  if (selectError) {
-    throw new AuthGuardError(
-      "PROFILE_NOT_FOUND",
-      "Unable to look up campus user profile in public.users.",
-      403
-    );
+  if (!sessionSelectError && sessionProfile) {
+    return sessionProfile;
+  }
+  if (sessionSelectError) {
+    lastFailureReason = sessionSelectError;
   }
 
-  if (existingProfile) {
-    return existingProfile;
+  // 2. Resolve Supabase Admin / Service Role client (`SUPABASE_SERVICE_ROLE_KEY`) cleanly
+  const hasServiceRoleKey = Boolean(
+    normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+  );
+  let adminClient: SupabaseClient<Database> | null = null;
+
+  if (hasServiceRoleKey) {
+    try {
+      adminClient = createAdminClient();
+    } catch (adminInitErr) {
+      lastFailureReason = adminInitErr;
+      adminClient = null;
+    }
+  }
+
+  if (adminClient) {
+    const { data: adminExistingProfile, error: adminSelectError } =
+      await adminClient
+        .from("users")
+        .select("*")
+        .eq("id", user.id)
+        .maybeSingle();
+
+    if (!adminSelectError && adminExistingProfile) {
+      return adminExistingProfile;
+    }
+    if (adminSelectError) {
+      lastFailureReason = adminSelectError;
+    }
   }
 
   const metadata = (user.user_metadata ?? {}) as Record<string, unknown>;
-  const fullName = deriveCampusDisplayName(normalizedEmail, metadata);
+  const derivedName = deriveCampusDisplayName(normalizedEmail, metadata).trim();
+  const fullName = derivedName || "Campus User";
   const organizationUnit =
     typeof metadata.organization_unit === "string" &&
     metadata.organization_unit.trim() !== ""
       ? metadata.organization_unit.trim()
       : null;
-  const defaultRole = resolveDefaultCampusRole(normalizedEmail);
+  const defaultRole: UserRole = resolveDefaultCampusRole(normalizedEmail);
 
-  const { data: insertedProfile, error: insertError } = await dbClient
-    .from("users")
-    .insert({
-      id: user.id,
-      email: normalizedEmail,
-      full_name: fullName,
-      organization_unit: organizationUnit,
-      role: defaultRole,
-    })
-    .select("*")
-    .single();
+  const newRow: Database["public"]["Tables"]["users"]["Insert"] = {
+    id: user.id,
+    email: normalizedEmail,
+    full_name: fullName,
+    organization_unit: organizationUnit,
+    role: defaultRole,
+  };
 
-  if (!insertError && insertedProfile) {
-    return insertedProfile;
+  // 3. Provision via Service Role client (`ignoreDuplicates: true` ensures existing roles are never overwritten)
+  if (adminClient) {
+    const { data: upsertedAdminProfile, error: adminUpsertError } =
+      await adminClient
+        .from("users")
+        .upsert(newRow, { onConflict: "id", ignoreDuplicates: true })
+        .select("*")
+        .maybeSingle();
+
+    if (!adminUpsertError && upsertedAdminProfile) {
+      return upsertedAdminProfile;
+    }
+
+    if (adminUpsertError) {
+      lastFailureReason = adminUpsertError;
+
+      // Handle pre-seeded `public.users` row with matching `email` (`users_email_key` 23505) without overwriting `role`
+      if (adminUpsertError.code === "23505") {
+        const { data: existingByEmail, error: emailLookupError } =
+          await adminClient
+            .from("users")
+            .select("*")
+            .eq("email", normalizedEmail)
+            .maybeSingle();
+
+        if (emailLookupError) {
+          lastFailureReason = emailLookupError;
+        } else if (existingByEmail) {
+          if (existingByEmail.id === user.id) {
+            return existingByEmail;
+          }
+
+          const { data: relinkedProfile, error: relinkError } =
+            await adminClient
+              .from("users")
+              .update({ id: user.id })
+              .eq("email", normalizedEmail)
+              .select("*")
+              .maybeSingle();
+
+          if (!relinkError && relinkedProfile) {
+            return relinkedProfile;
+          }
+          if (relinkError) {
+            lastFailureReason = relinkError;
+          }
+        }
+      }
+    }
+
+    // When `ignoreDuplicates: true` skips an existing row, PostgREST returns null data without error; re-select by id
+    const { data: fetchedAfterAdminUpsert, error: postUpsertSelectError } =
+      await adminClient
+        .from("users")
+        .select("*")
+        .eq("id", user.id)
+        .maybeSingle();
+
+    if (!postUpsertSelectError && fetchedAfterAdminUpsert) {
+      return fetchedAfterAdminUpsert;
+    }
+    if (postUpsertSelectError) {
+      lastFailureReason = postUpsertSelectError;
+    }
   }
 
-  // Handle concurrent provisioning race (e.g., `on_auth_user_created` DB trigger or parallel SSR requests)
-  const { data: racedProfile } = await dbClient
-    .from("users")
-    .select("*")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  if (racedProfile) {
-    return racedProfile;
-  }
+  // Only log to console.error if every lookup & admin provisioning path failed completely
+  console.error("[ensureCampusUserProfile] Profile provisioning failed:", {
+    userId: user.id,
+    email: normalizedEmail,
+    hasServiceRoleKey,
+    ...formatPostgrestDiagnostic(lastFailureReason),
+  });
 
   throw new AuthGuardError(
     "PROFILE_NOT_FOUND",
-    "Authenticated campus user profile could not be provisioned in public.users.",
+    hasServiceRoleKey
+      ? "Authenticated campus user profile could not be provisioned in public.users."
+      : "Server is missing SUPABASE_SERVICE_ROLE_KEY required to provision public.users under strict RLS.",
     403
   );
 }
@@ -206,9 +317,11 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
       : null;
 
   let signatureStoragePath: string | null =
-    typeof profile.signature_url === "string" && profile.signature_url.trim() !== ""
+    metadataPath ??
+    (typeof profile.signature_url === "string" &&
+    profile.signature_url.trim() !== ""
       ? profile.signature_url.trim()
-      : metadataPath;
+      : null);
 
   if (!signatureStoragePath) {
     const { data: latestSignature } = await supabase
@@ -229,6 +342,21 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
       .from(SIGNATURES_BUCKET)
       .createSignedUrl(signatureStoragePath, SIGNED_URL_TTL_SECONDS);
     signedPreviewUrl = signedData?.signedUrl ?? null;
+
+    if (
+      !signedPreviewUrl &&
+      normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+    ) {
+      try {
+        const adminClient = createAdminClient();
+        const { data: adminSignedData } = await adminClient.storage
+          .from(SIGNATURES_BUCKET)
+          .createSignedUrl(signatureStoragePath, SIGNED_URL_TTL_SECONDS);
+        signedPreviewUrl = adminSignedData?.signedUrl ?? null;
+      } catch {
+        // Keep null if service role client cannot be initialized
+      }
+    }
   }
 
   return {
@@ -236,6 +364,7 @@ export async function getCurrentUserProfile(): Promise<AuthenticatedUserProfile 
     email: profile.email,
     full_name: profile.full_name,
     role: profile.role,
+    functional_role: profile.functional_role ?? null,
     organization_unit: profile.organization_unit,
     organization_name: profile.organization_unit,
     signature_storage_path: signatureStoragePath,

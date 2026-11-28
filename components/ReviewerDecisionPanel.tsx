@@ -195,8 +195,8 @@ export default function ReviewerDecisionPanel({
             }}
             className={`rounded-full px-4 py-1.5 text-xs font-semibold transition cursor-pointer ${
               mode === "request_revision"
-                ? "bg-amber-600 text-white shadow-2xs"
-                : "text-slate-600 hover:text-amber-800"
+                ? "bg-rose-600 text-white shadow-2xs"
+                : "text-slate-600 hover:text-rose-800"
             }`}
           >
             Request Revision
@@ -278,9 +278,15 @@ export default function ReviewerDecisionPanel({
                 </div>
               )}
 
-              {/* Stamp Format Toggle */}
-              <div className="mt-3 flex items-center gap-4 text-xs">
-                <label className="flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+              {/* Stamp Format Toggle (Prototype Card Selection) */}
+              <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <label
+                  className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-xs font-semibold transition cursor-pointer ${
+                    signatureType === "drawn"
+                      ? "border-[#1E3A8A] bg-[#1E3A8A]/[0.04] text-[#0F172A]"
+                      : "border-[#E2E8F0] bg-[#F8FAFC] text-slate-600 hover:bg-white"
+                  }`}
+                >
                   <input
                     type="radio"
                     name="sig-type"
@@ -288,9 +294,15 @@ export default function ReviewerDecisionPanel({
                     onChange={() => setSignatureType("drawn")}
                     className="text-[#0F172A]"
                   />
-                  <span>Stamp Saved Signature Image</span>
+                  <span>Hand-Drawn Signature</span>
                 </label>
-                <label className="flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                <label
+                  className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-xs font-semibold transition cursor-pointer ${
+                    signatureType === "stamp"
+                      ? "border-[#1E3A8A] bg-[#1E3A8A]/[0.04] text-[#0F172A]"
+                      : "border-[#E2E8F0] bg-[#F8FAFC] text-slate-600 hover:bg-white"
+                  }`}
+                >
                   <input
                     type="radio"
                     name="sig-type"
@@ -298,7 +310,7 @@ export default function ReviewerDecisionPanel({
                     onChange={() => setSignatureType("stamp")}
                     className="text-[#0F172A]"
                   />
-                  <span>Official Institutional Digital Stamp</span>
+                  <span>Official Digital Stamp</span>
                 </label>
               </div>
             </div>
@@ -325,19 +337,19 @@ export default function ReviewerDecisionPanel({
 
         {/* REQUEST REVISION MODE */}
         {mode === "request_revision" && (
-          <div className="rounded-2xl border border-amber-200 bg-amber-50/50 p-4">
+          <div className="rounded-2xl border border-rose-200 bg-gradient-to-r from-rose-50/70 via-amber-50/40 to-rose-50/70 p-4">
             <div className="flex items-center justify-between">
               <label
                 htmlFor="decision-notes-revision"
-                className="block text-xs font-bold uppercase tracking-wider text-amber-950"
+                className="block text-xs font-bold uppercase tracking-wider text-rose-900"
               >
                 Mandatory Revision Instructions *
               </label>
-              <span className="text-[11px] text-amber-800">
+              <span className="text-[11px] font-medium text-rose-700">
                 {notes.trim().length} chars (min {MIN_DECISION_NOTE_LENGTH})
               </span>
             </div>
-            <p className="mt-1 text-xs text-amber-900/80">
+            <p className="mt-1 text-xs text-slate-600">
               Unlocks the proposal so the submitter can revise and resubmit as v
               {currentVersion + 1}.0. All earlier approved TTD signatures remain
               preserved.
@@ -351,7 +363,7 @@ export default function ReviewerDecisionPanel({
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Clearly specify what budget lines, schedule items, or attachments must be updated..."
-              className="mt-2.5 w-full rounded-xl border border-amber-300 bg-white px-3.5 py-2.5 text-xs leading-relaxed text-[#0F172A] focus:border-amber-600 focus:outline-none"
+              className="mt-2.5 w-full rounded-xl border border-rose-300 bg-white px-3.5 py-2.5 text-xs leading-relaxed text-[#0F172A] focus:border-rose-600 focus:outline-none"
             />
           </div>
         )}
@@ -399,8 +411,7 @@ export default function ReviewerDecisionPanel({
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#E2E8F0] pt-4">
           <span className="text-[11px] text-slate-500">
-            Every decision is permanently recorded in the immutable{" "}
-            <span className="font-mono">revision_logs</span> audit trail.
+            Every decision is permanently recorded in the approval history.
           </span>
 
           <button
@@ -412,8 +423,8 @@ export default function ReviewerDecisionPanel({
               mode === "approve"
                 ? "bg-[#0F172A] hover:bg-[#1E3A8A]"
                 : mode === "request_revision"
-                ? "bg-amber-600 hover:bg-amber-700"
-                : "bg-rose-700 hover:bg-rose-800"
+                ? "bg-rose-600 hover:bg-rose-700"
+                : "bg-rose-800 hover:bg-rose-900"
             }`}
           >
             <span>

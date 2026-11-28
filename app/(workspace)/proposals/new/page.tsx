@@ -1,18 +1,25 @@
 import React, { Suspense } from "react";
+import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
+import { createAdminClient } from "@/src/lib/supabase/admin";
 import { createClient } from "@/src/lib/supabase/server";
+import { normalizeEnvValue } from "@/src/lib/supabase/url";
 import ProposalCreationWizard from "@/components/ProposalCreationWizard";
 
 async function NewProposalLoader() {
+  await connection();
   const profile = await requireAuth();
   const supabase = await createClient();
+  const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+    ? createAdminClient()
+    : supabase;
 
-  const { data: directoryUsers } = await supabase
+  const { data: directoryUsers } = await dbClient
     .from("users")
-    .select("id, email, full_name, organization_unit, role")
+    .select("id, email, full_name, organization_unit, role, functional_role")
     .order("role", { ascending: true })
     .order("full_name", { ascending: true })
-    .limit(50);
+    .limit(80);
 
   return (
     <ProposalCreationWizard

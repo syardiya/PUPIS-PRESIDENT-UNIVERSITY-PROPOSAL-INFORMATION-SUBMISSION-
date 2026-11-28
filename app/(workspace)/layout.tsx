@@ -1,18 +1,16 @@
 import React, { Suspense } from "react";
 import { redirect } from "next/navigation";
+import { connection } from "next/server";
 import WorkspaceShell from "@/components/WorkspaceShell";
 import { AuthGuardError, requireAuth } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 
 function WorkspaceShellSkeleton() {
   return (
-    <div className="flex min-h-screen bg-[#F8FAFC] text-[#0F172A]">
-      <div className="hidden lg:block lg:w-68 lg:border-r lg:border-[#E2E8F0] lg:bg-white" />
-      <div className="flex flex-1 flex-col">
-        <div className="h-16 border-b border-[#E2E8F0] bg-white" />
-        <div className="flex flex-1 items-center justify-center p-8 text-xs font-medium text-slate-500">
-          Verifying President University workspace session...
-        </div>
+    <div className="flex min-h-screen flex-col bg-[#F8FAFC] text-[#0F172A]">
+      <div className="h-16 border-b border-[#E2E8F0] bg-white/95" />
+      <div className="flex flex-1 items-center justify-center p-8 text-xs font-medium text-slate-500">
+        Verifying President University workspace session...
       </div>
     </div>
   );
@@ -23,6 +21,8 @@ async function AuthenticatedWorkspaceContainer({
 }: {
   children: React.ReactNode;
 }) {
+  await connection();
+
   let profile;
   try {
     profile = await requireAuth();
@@ -68,6 +68,7 @@ async function AuthenticatedWorkspaceContainer({
         email: profile.email,
         full_name: profile.full_name,
         role: profile.role,
+        functional_role: profile.functional_role,
         organization_unit: profile.organization_unit,
         has_signature: Boolean(profile.signature_storage_path),
         has_assigned_approvals: (assignedApprovalsCount ?? 0) > 0,

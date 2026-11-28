@@ -2,6 +2,7 @@ import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, toAuthErrorResponse } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
+import type { SecretaryReviewStatusDb } from "@/src/lib/supabase/database.types";
 import {
   computeBudgetItemsGrandTotal,
   proposalFinalSubmissionSchema,
@@ -13,6 +14,10 @@ import {
   formatExecutiveSummaryText,
   parseBudgetItemsFromJson,
 } from "@/src/lib/proposals/server-helpers";
+import {
+  canBeAssignedAsApprover,
+  isFacultySecretaryProfile,
+} from "@/src/lib/proposals/approver-authority";
 
 export async function POST(
   request: NextRequest,
@@ -112,10 +117,16 @@ export async function POST(
       );
     }
 
-    const [{ data: signers }, { data: attachments }] = await Promise.all([
+    const [
+      { data: signers },
+      { data: attachments },
+      { data: staffUsers },
+    ] = await Promise.all([
       supabase
         .from("proposal_signers")
-        .select("id, approver_id, role_title, step_order, status")
+        .select(
+          "id, approver_id, role_title, step_order, status, users:approver_id(id, email, full_name, role, functional_role, organization_unit)"
+        )
         .eq("proposal_id", proposal.id)
         .order("step_order", { ascending: true }),
       supabase
@@ -123,7 +134,34 @@ export async function POST(
         .select("id, storage_path, mime_type, attachment_kind, created_at")
         .eq("proposal_id", proposal.id)
         .order("created_at", { ascending: true }),
+      supabase
+        .from("users")
+        .select("id, email, full_name, role, functional_role, organization_unit")
+        .eq("role", "staff"),
     ]);
+
+    // PBI-04 Defense-in-Depth: Verify every assigned signer holds official approver authority
+    for (const s of signers ?? []) {
+      const approverUser = Array.isArray(s.users)
+        ? s.users[0] ?? null
+        : s.users ?? null;
+      const authorityCheck = canBeAssignedAsApprover(approverUser);
+      if (!authorityCheck.allowed) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "UNAUTHORIZED_APPROVER",
+              message: `Step ${s.step_order} approver '${
+                approverUser?.full_name ?? s.approver_id
+              }' is not authorized: ${
+                authorityCheck.reason ?? "Invalid approver authority."
+              }`,
+            },
+          },
+          { status: 422 }
+        );
+      }
+    }
 
     const budgetItems = parseBudgetItemsFromJson(proposal.budget_items);
     const computedGrandTotal = computeBudgetItemsGrandTotal(budgetItems);
@@ -188,8 +226,8 @@ export async function POST(
     const targetVersion = isResubmission
       ? proposal.current_version + 1
       : proposal.current_version;
+    const nowIso = new Date().toISOString();
 
-    // Pick primary PDF path (or first uploaded attachment path) for immutable version snapshot
     const primaryAttachment =
       (attachments ?? []).find(
         (a) => a.attachment_kind === "primary_proposal_pdf"
@@ -251,16 +289,37 @@ export async function POST(
       );
     }
 
-    // 3. Transition proposal status to 'pending_ttd' (In Review) and lock editing
+    // Determine PBI-05 Faculty Secretary Intake routing:
+    // Route through `pending_review` when at least one Faculty Secretary exists and no TTD signer has signed yet.
+    const facultySecretaries = (staffUsers ?? []).filter((u) =>
+      isFacultySecretaryProfile(u)
+    );
+    const hasPriorSignedSteps = (signers ?? []).some(
+      (s) => s.status === "signed"
+    );
+    const shouldRouteViaSecretary =
+      !hasPriorSignedSteps && facultySecretaries.length > 0;
+
+    const nextSecretaryStatus: SecretaryReviewStatusDb = shouldRouteViaSecretary
+      ? "pending_review"
+      : hasPriorSignedSteps && proposal.secretary_review_status === "forwarded"
+      ? "forwarded"
+      : "not_started";
+
+    // 3. Transition proposal status to 'pending_ttd' (In Review) and record `submitted_at` + intake status
     const { data: submittedProposal, error: statusUpdateError } = await supabase
       .from("proposals")
       .update({
         status: "pending_ttd",
         current_version: targetVersion,
         total_budget: computedGrandTotal,
+        submitted_at: nowIso,
+        secretary_review_status: nextSecretaryStatus,
       })
       .eq("id", proposal.id)
-      .select("id, proposal_code, title, status, current_version, updated_at")
+      .select(
+        "id, proposal_code, title, status, secretary_review_status, submitted_at, current_version, updated_at"
+      )
       .single();
 
     if (statusUpdateError || !submittedProposal) {
@@ -281,7 +340,11 @@ export async function POST(
     const auditNote =
       parsedBody.data.submission_note ||
       (isResubmission
-        ? `Resubmitted revised proposal v${targetVersion}.0.`
+        ? shouldRouteViaSecretary
+          ? `Resubmitted revised proposal v${targetVersion}.0 for Faculty Secretary intake verification.`
+          : `Resubmitted revised proposal v${targetVersion}.0.`
+        : shouldRouteViaSecretary
+        ? `Initial proposal v${targetVersion}.0 submitted. Routed to Faculty Secretary for completeness verification.`
         : `Initial proposal v${targetVersion}.0 submitted for sequential TTD review.`);
 
     await supabase.from("revision_logs").insert({
@@ -293,12 +356,24 @@ export async function POST(
       note: auditNote,
     });
 
-    // 5. Notify the active first pending approver in `public.notifications`
+    // 5. Notify Faculty Secretary (if routed via intake) or the active first pending approver
     const firstPendingSigner = (signers ?? [])
       .filter((s) => s.status !== "signed")
       .sort((a, b) => a.step_order - b.step_order)[0];
 
-    if (firstPendingSigner) {
+    if (shouldRouteViaSecretary) {
+      const secretaryNotifications = facultySecretaries.map((sec) => ({
+        user_id: sec.id,
+        proposal_id: proposal.id,
+        title: isResubmission
+          ? `Resubmitted Proposal for Intake Check (${proposal.proposal_code})`
+          : `New Incoming Proposal for Intake Check (${proposal.proposal_code})`,
+        message: `${profile.full_name} (${proposal.organization_name}) submitted "${proposal.title}" (v${targetVersion}.0). Verify document completeness and forward to Step ${
+          firstPendingSigner?.step_order ?? 1
+        } (${firstPendingSigner?.role_title ?? "Approver"}).`,
+      }));
+      await supabase.from("notifications").insert(secretaryNotifications);
+    } else if (firstPendingSigner) {
       await supabase.from("notifications").insert({
         user_id: firstPendingSigner.approver_id,
         proposal_id: proposal.id,

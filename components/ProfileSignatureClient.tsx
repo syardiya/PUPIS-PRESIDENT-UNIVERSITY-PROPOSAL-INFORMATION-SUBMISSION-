@@ -309,7 +309,7 @@ export default function ProfileSignatureClient({
     if (file.type !== "image/png" || !file.name.toLowerCase().endsWith(".png")) {
       setSignatureFeedback({
         type: "error",
-        message: "Only transparent PNG images (image/png) are accepted.",
+        message: "Only transparent PNG signature files (.png) are accepted.",
       });
       e.target.value = "";
       return;
@@ -465,26 +465,30 @@ export default function ProfileSignatureClient({
         <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#E2E8F0] pb-4">
           <div>
             <span className="text-xs font-bold uppercase tracking-wider text-[#1E3A8A]">
-              Zero-Trust Private Storage
+              Campus Digital Signature
             </span>
             <h2 className="mt-1 text-lg font-bold text-[#0F172A]">
               Official Digital Signature (TTD)
             </h2>
             <p className="mt-0.5 text-xs text-slate-500">
-              Stored privately in{" "}
-              <span className="font-mono text-slate-700">user-signatures</span>{" "}
-              and served strictly via short-lived signed URLs.
+              Saved securely to your campus profile for official proposal
+              sign-offs.
             </p>
           </div>
 
           <span
-            className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${
+            className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold ${
               activePreviewUrl
                 ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                 : "border-amber-200 bg-amber-50 text-amber-800"
             }`}
           >
-            {activePreviewUrl ? "✓ Signature Active" : "No Signature Yet"}
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                activePreviewUrl ? "bg-emerald-600" : "bg-amber-500"
+              }`}
+            />
+            {activePreviewUrl ? "Signature Active" : "No Signature Yet"}
           </span>
         </div>
 
@@ -495,8 +499,8 @@ export default function ProfileSignatureClient({
               Active Signature Preview (Transparency Check)
             </span>
             {activeStoragePath && (
-              <span className="max-w-[260px] truncate font-mono text-[11px] text-slate-400">
-                {activeStoragePath}
+              <span className="text-[11px] font-medium text-slate-500">
+                Saved on profile
               </span>
             )}
           </div>
@@ -535,13 +539,26 @@ export default function ProfileSignatureClient({
                 setMode("draw");
                 setSignatureFeedback(null);
               }}
-              className={`rounded-full px-4 py-2 text-xs font-semibold transition cursor-pointer ${
+              className={`inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-xs font-semibold transition cursor-pointer ${
                 mode === "draw"
                   ? "bg-[#0F172A] text-white shadow-2xs"
                   : "text-slate-600 hover:text-[#0F172A]"
               }`}
             >
-              Draw Transparent Signature
+              <svg
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"
+                />
+              </svg>
+              <span>Draw Signature</span>
             </button>
             <button
               type="button"
@@ -549,13 +566,26 @@ export default function ProfileSignatureClient({
                 setMode("upload");
                 setSignatureFeedback(null);
               }}
-              className={`rounded-full px-4 py-2 text-xs font-semibold transition cursor-pointer ${
+              className={`inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-xs font-semibold transition cursor-pointer ${
                 mode === "upload"
                   ? "bg-[#0F172A] text-white shadow-2xs"
                   : "text-slate-600 hover:text-[#0F172A]"
               }`}
             >
-              Upload Transparent PNG
+              <svg
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
+                />
+              </svg>
+              <span>Upload PNG</span>
             </button>
           </div>
 
@@ -621,8 +651,7 @@ export default function ProfileSignatureClient({
                     : "Click to choose a transparent PNG signature"}
                 </span>
                 <span className="mt-1 text-[11px] text-slate-500">
-                  Strictly PNG format (image/png) • Maximum 2 MB • Server
-                  magic-byte verified
+                  Transparent PNG format (.png) • Maximum 2 MB
                 </span>
                 <input
                   id="signature-png-upload"

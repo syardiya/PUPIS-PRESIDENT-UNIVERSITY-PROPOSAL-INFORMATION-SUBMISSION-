@@ -1,36 +1,49 @@
 import React, { Suspense } from "react";
 import Link from "next/link";
+import { connection } from "next/server";
 import { requireAuth, isApproverOrAdminRole } from "@/src/lib/auth/guard";
+import { isFacultySecretaryProfile } from "@/src/lib/proposals/approver-authority";
 import { createClient } from "@/src/lib/supabase/server";
 import type { ProposalStatusDb } from "@/src/lib/supabase/database.types";
 
 function getStatusBadge(status: ProposalStatusDb) {
   switch (status) {
+    case "completed":
+      return {
+        label: "Completed",
+        classes: "bg-emerald-100/80 text-emerald-900 border-emerald-300",
+        dotClasses: "bg-emerald-700",
+      };
     case "approved":
       return {
         label: "Approved",
         classes: "bg-emerald-50 text-emerald-800 border-emerald-200",
+        dotClasses: "bg-emerald-600",
       };
     case "needs_revision":
       return {
-        label: "Revision Requested",
-        classes: "bg-amber-50 text-amber-800 border-amber-200",
+        label: "Needs Revision",
+        classes: "bg-rose-50 text-rose-800 border-rose-200",
+        dotClasses: "bg-rose-600",
       };
     case "rejected":
       return {
         label: "Rejected",
-        classes: "bg-rose-50 text-rose-800 border-rose-200",
+        classes: "bg-rose-100/70 text-rose-900 border-rose-300",
+        dotClasses: "bg-rose-700",
       };
     case "draft":
       return {
         label: "Draft",
-        classes: "bg-slate-100 text-slate-700 border-slate-200",
+        classes: "bg-slate-100 text-slate-700 border-slate-300",
+        dotClasses: "bg-slate-400",
       };
     case "pending_ttd":
     default:
       return {
-        label: "In Review (Pending TTD)",
+        label: "Pending TTD",
         classes: "bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/25",
+        dotClasses: "bg-[#1E3A8A]",
       };
   }
 }
@@ -44,6 +57,7 @@ function formatIdr(amount: number): string {
 }
 
 async function DashboardDataSection() {
+  await connection();
   const profile = await requireAuth();
   const supabase = await createClient();
 
@@ -72,7 +86,9 @@ async function DashboardDataSection() {
   const revisionCount = allProposals.filter(
     (p) => p.status === "needs_revision"
   ).length;
-  const approvedProposals = allProposals.filter((p) => p.status === "approved");
+  const approvedProposals = allProposals.filter(
+    (p) => p.status === "approved" || p.status === "completed"
+  );
   const approvedBudgetTotal = approvedProposals.reduce(
     (sum, p) => sum + Number(p.total_budget || 0),
     0
@@ -115,14 +131,15 @@ async function DashboardDataSection() {
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
-          {!profile.signature_storage_path && (
-            <Link
-              href="/profile"
-              className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-900 transition hover:bg-amber-100"
-            >
-              <span>Configure Digital Signature (TTD) →</span>
-            </Link>
-          )}
+          {!profile.signature_storage_path &&
+            !isFacultySecretaryProfile(profile) && (
+              <Link
+                href="/profile"
+                className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-50 px-4 py-2 text-xs font-semibold text-amber-900 transition hover:bg-amber-100"
+              >
+                <span>Configure Digital Signature (TTD) →</span>
+              </Link>
+            )}
 
           {isApproverOrAdminRole(profile.role) && (
             <>
@@ -136,7 +153,13 @@ async function DashboardDataSection() {
                 href="/approvals"
                 className="inline-flex items-center gap-2 rounded-full bg-[#0F172A] px-5 py-2 text-xs font-semibold text-white transition hover:bg-[#1E3A8A]"
               >
-                <span>Open Approval Queue</span>
+                <span>
+                  {isFacultySecretaryProfile(profile)
+                    ? "Open Secretary Intake Queue"
+                    : profile.functional_role === "student_affairs"
+                    ? "Open Final Signature Queue"
+                    : "Open Approval Queue"}
+                </span>
               </Link>
             </>
           )}
@@ -153,7 +176,7 @@ async function DashboardDataSection() {
             {allProposals.length}
           </p>
           <p className="mt-1 text-[11px] text-slate-400">
-            Scoped by PostgreSQL RLS
+            Based on your campus role
           </p>
         </div>
 
@@ -278,17 +301,17 @@ async function DashboardDataSection() {
               )}
             </div>
           ) : (
-            <div className="mt-3 divide-y divide-slate-100">
+            <div className="mt-4 space-y-3">
               {recentList.map((item) => {
                 const badge = getStatusBadge(item.status);
                 return (
                   <Link
                     key={item.id}
                     href={`/proposals/${item.id}`}
-                    className="flex flex-wrap items-center justify-between gap-4 rounded-xl px-2 py-3.5 transition hover:bg-slate-50"
+                    className="group block rounded-2xl border border-[#E2E8F0] bg-white p-4 transition hover:border-[#1E3A8A]/40 hover:shadow-2xs"
                   >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono text-xs font-semibold text-slate-500">
                           {item.proposal_code}
                         </span>
@@ -301,21 +324,35 @@ async function DashboardDataSection() {
                           </span>
                         )}
                       </div>
-                      <p className="mt-1 truncate text-sm font-bold text-[#0F172A]">
-                        {item.title || "Untitled Proposal Draft"}
-                      </p>
-                      <p className="text-xs text-slate-500">
-                        {item.organization_name || "Unspecified Unit"} • Event:{" "}
-                        {item.event_date} •{" "}
-                        {formatIdr(Number(item.total_budget))}
-                      </p>
+
+                      <span
+                        className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${badge.classes}`}
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${badge.dotClasses}`}
+                        />
+                        {badge.label}
+                      </span>
                     </div>
 
-                    <span
-                      className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold ${badge.classes}`}
-                    >
-                      {badge.label}
-                    </span>
+                    <p className="mt-2 text-xs font-semibold text-[#1E3A8A]">
+                      {item.organization_name || "Unspecified Organization"}
+                    </p>
+                    <h3 className="mt-0.5 truncate text-sm font-bold text-[#0F172A] group-hover:text-[#1E3A8A]">
+                      {item.title || "Untitled Proposal Draft"}
+                    </h3>
+
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-2.5 text-xs text-slate-500">
+                      <span>Event Date: {item.event_date}</span>
+                      <div className="flex items-center gap-3">
+                        <span className="font-semibold text-[#0F172A]">
+                          {formatIdr(Number(item.total_budget))}
+                        </span>
+                        <span className="font-semibold text-[#1E3A8A]">
+                          Inspect →
+                        </span>
+                      </div>
+                    </div>
                   </Link>
                 );
               })}

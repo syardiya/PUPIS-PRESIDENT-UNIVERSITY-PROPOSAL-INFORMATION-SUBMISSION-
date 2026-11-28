@@ -1,5 +1,6 @@
 import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   requireAuth,
   SIGNATURES_BUCKET,
@@ -8,10 +9,23 @@ import {
 } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import { createAdminClient } from "@/src/lib/supabase/admin";
+import type { Database } from "@/src/lib/supabase/database.types";
+import { normalizeEnvValue } from "@/src/lib/supabase/url";
 import {
   sanitizeStorageFilename,
   validateSignaturePngFile,
 } from "@/src/lib/validations/proposal";
+
+function getOptionalAdminClient(): SupabaseClient<Database> | null {
+  if (!normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)) {
+    return null;
+  }
+  try {
+    return createAdminClient();
+  } catch {
+    return null;
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -38,7 +52,8 @@ export async function POST(request: NextRequest) {
         {
           error: {
             code: "MISSING_FILE",
-            message: "Please attach a PNG signature image under the 'file' field.",
+            message:
+              "Please attach a PNG signature image under the 'file' field.",
           },
         },
         { status: 400 }
@@ -71,9 +86,11 @@ export async function POST(request: NextRequest) {
     const newStoragePath = `${profile.id}/${safeGeneratedName}`;
 
     const supabase = await createClient();
+    const adminClient = getOptionalAdminClient();
     const fileBuffer = await uploadedEntry.arrayBuffer();
 
-    const { error: uploadError } = await supabase.storage
+    // 1. Upload PNG to private `user-signatures` bucket (try user session first, fallback to adminClient)
+    let { error: uploadError } = await supabase.storage
       .from(SIGNATURES_BUCKET)
       .upload(newStoragePath, fileBuffer, {
         contentType: "image/png",
@@ -81,7 +98,22 @@ export async function POST(request: NextRequest) {
         upsert: false,
       });
 
+    if (uploadError && adminClient) {
+      const retryUpload = await adminClient.storage
+        .from(SIGNATURES_BUCKET)
+        .upload(newStoragePath, fileBuffer, {
+          contentType: "image/png",
+          cacheControl: "3600",
+          upsert: false,
+        });
+      uploadError = retryUpload.error;
+    }
+
     if (uploadError) {
+      console.error(
+        "[POST /api/profile/signature] Storage upload failed:",
+        uploadError
+      );
       return NextResponse.json(
         {
           error: {
@@ -95,41 +127,72 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Persist storage object path to `public.users.signature_url`
-    const { error: userUpdateError } = await supabase
+    // 2. Link uploaded signature path to `public.users.signature_url` (using Service Role scoped strictly to `profile.id`)
+    //    AND sync `auth.users` `user_metadata.signature_storage_path` for resilient resolution.
+    const privilegedDbClient = adminClient ?? supabase;
+    let linkedInUsersTable = false;
+    let linkedInAuthMetadata = false;
+
+    const { error: userUpdateError } = await privilegedDbClient
       .from("users")
       .update({ signature_url: newStoragePath })
       .eq("id", profile.id);
 
-    if (userUpdateError) {
-      // Fallback: if migration 002 (`public.users.signature_url`) has not been applied
-      // on a remote DB yet, also persist in user_metadata so active signature resolution works.
-      const isMissingColumnError =
-        userUpdateError.code === "PGRST204" ||
-        userUpdateError.code === "42703" ||
-        userUpdateError.message.includes("signature_url");
-
-      if (!isMissingColumnError) {
-        await supabase.storage.from(SIGNATURES_BUCKET).remove([newStoragePath]);
-        return NextResponse.json(
-          {
-            error: {
-              code: "PROFILE_SIGNATURE_SAVE_FAILED",
-              message: "Failed to link uploaded signature to user profile.",
-            },
-          },
-          { status: 500 }
-        );
-      }
+    if (!userUpdateError) {
+      linkedInUsersTable = true;
     }
 
-    // Keep auth metadata synced as well for resilient server-side lookup
-    await supabase.auth.updateUser({
+    const { error: authMetaError } = await supabase.auth.updateUser({
       data: { signature_storage_path: newStoragePath },
     });
 
-    // Safely delete previous profile signature ONLY if owned by this user AND not
-    // referenced by any historical signed proposal in `public.proposal_signers`.
+    if (!authMetaError) {
+      linkedInAuthMetadata = true;
+    } else if (adminClient) {
+      const { data: existingAuthUser } =
+        await adminClient.auth.admin.getUserById(profile.id);
+      const currentMeta =
+        (existingAuthUser?.user?.user_metadata as
+          | Record<string, unknown>
+          | undefined) ?? {};
+      const { error: adminMetaError } =
+        await adminClient.auth.admin.updateUserById(profile.id, {
+          user_metadata: {
+            ...currentMeta,
+            signature_storage_path: newStoragePath,
+          },
+        });
+      if (!adminMetaError) {
+        linkedInAuthMetadata = true;
+      }
+    }
+
+    // Only fail if NEITHER `public.users.signature_url` NOR `auth.users` metadata persisted the path
+    if (!linkedInUsersTable && !linkedInAuthMetadata) {
+      console.error(
+        "[POST /api/profile/signature] Failed to link signature path:",
+        {
+          userId: profile.id,
+          userUpdateError,
+          authMetaError,
+        }
+      );
+      await privilegedDbClient.storage
+        .from(SIGNATURES_BUCKET)
+        .remove([newStoragePath]);
+      return NextResponse.json(
+        {
+          error: {
+            code: "PROFILE_SIGNATURE_SAVE_FAILED",
+            message: "Failed to link uploaded signature to user profile.",
+          },
+        },
+        { status: 500 }
+      );
+    }
+
+    // 3. Safely delete previous profile signature ONLY if owned by this user AND not
+    //    referenced by any historical signed proposal in `public.proposal_signers`.
     const previousPath = profile.signature_storage_path;
     if (
       previousPath &&
@@ -137,26 +200,30 @@ export async function POST(request: NextRequest) {
       previousPath.startsWith(`${profile.id}/`) &&
       !previousPath.includes("..")
     ) {
-      const privilegedOrUserClient = process.env.SUPABASE_SERVICE_ROLE_KEY
-        ? createAdminClient()
-        : supabase;
-
-      const { count: referencedCount } = await privilegedOrUserClient
+      const { count: referencedCount } = await privilegedDbClient
         .from("proposal_signers")
         .select("id", { count: "exact", head: true })
         .eq("signature_storage_path", previousPath);
 
       if ((referencedCount ?? 0) === 0) {
-        await privilegedOrUserClient.storage
+        await privilegedDbClient.storage
           .from(SIGNATURES_BUCKET)
           .remove([previousPath]);
       }
     }
 
-    // Generate short-lived signed preview URL (`createSignedUrl`)
-    const { data: signedData, error: signedError } = await supabase.storage
+    // 4. Generate short-lived signed preview URL (`createSignedUrl`)
+    let { data: signedData, error: signedError } = await supabase.storage
       .from(SIGNATURES_BUCKET)
       .createSignedUrl(newStoragePath, SIGNED_URL_TTL_SECONDS);
+
+    if ((!signedData?.signedUrl || signedError) && adminClient) {
+      const adminSigned = await adminClient.storage
+        .from(SIGNATURES_BUCKET)
+        .createSignedUrl(newStoragePath, SIGNED_URL_TTL_SECONDS);
+      signedData = adminSigned.data;
+      signedError = adminSigned.error;
+    }
 
     if (signedError || !signedData?.signedUrl) {
       return NextResponse.json(
@@ -173,6 +240,8 @@ export async function POST(request: NextRequest) {
 
     revalidatePath("/profile");
     revalidatePath("/dashboard");
+    revalidatePath("/approvals");
+    revalidatePath("/proposals/new");
 
     return NextResponse.json({
       ok: true,
@@ -184,6 +253,7 @@ export async function POST(request: NextRequest) {
     const authResponse = toAuthErrorResponse(error);
     if (authResponse) return authResponse;
 
+    console.error("[POST /api/profile/signature] Unexpected error:", error);
     return NextResponse.json(
       {
         error: {

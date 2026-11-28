@@ -4,7 +4,6 @@ import React, { Suspense, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { createClient } from "@/src/lib/supabase/client";
-import { buildAuthCallbackUrl } from "@/src/lib/supabase/url";
 import {
   isAllowedInstitutionalEmail,
   sanitizeRedirectPath,
@@ -22,7 +21,7 @@ const AUTH_ERROR_MESSAGES: Record<
   auth_callback_failed: {
     title: "Sign-In Verification Failed",
     description:
-      "The Magic Link or one-time verification code could not be verified or has expired. Please request a fresh verification email below.",
+      "Your authentication request could not be verified. Please sign in with your campus email and password below.",
   },
   session_expired: {
     title: "Session Expired",
@@ -32,7 +31,7 @@ const AUTH_ERROR_MESSAGES: Record<
   missing_auth_code: {
     title: "Incomplete Sign-In Request",
     description:
-      "No verification token was found in the callback URL. Please initiate sign-in with your campus email below.",
+      "Please sign in using your official campus email and password below.",
   },
   auth_user_unavailable: {
     title: "Account Verification Incomplete",
@@ -42,7 +41,7 @@ const AUTH_ERROR_MESSAGES: Record<
   profile_lookup_failed: {
     title: "Profile Verification Error",
     description:
-      "Unable to verify your institutional profile record. Please try again shortly.",
+      "Unable to verify your institutional profile record. Please sign in again.",
   },
   profile_sync_failed: {
     title: "Profile Provisioning Error",
@@ -64,26 +63,22 @@ function LoginFormContent() {
   const nextPath = sanitizeRedirectPath(searchParams.get("next"));
 
   const [email, setEmail] = useState("");
-  const [otpToken, setOtpToken] = useState("");
-  const [otpSentTo, setOtpSentTo] = useState<string | null>(null);
-
-  const [isOtpLoading, setIsOtpLoading] = useState(false);
-  const [isVerifyLoading, setIsVerifyLoading] = useState(false);
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState("");
-  const [infoMessage, setInfoMessage] = useState("");
 
   const activeBanner = errorCode
     ? AUTH_ERROR_MESSAGES[errorCode] ?? {
         title: "Authentication Error",
         description:
-          "We could not complete your sign-in request. Please sign in with your President University email.",
+          "We could not complete your sign-in request. Please sign in with your President University email and password.",
       }
     : null;
 
-  const handleRequestOtp = async (e: React.FormEvent) => {
+  const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError("");
-    setInfoMessage("");
 
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) {
@@ -98,89 +93,27 @@ function LoginFormContent() {
       return;
     }
 
-    setIsOtpLoading(true);
+    if (!password) {
+      setFormError("Please enter your password.");
+      return;
+    }
+
+    setIsSubmitting(true);
     try {
       const supabase = createClient();
-      const browserOrigin =
-        typeof window !== "undefined" ? window.location.origin : null;
-      const emailRedirectTo = buildAuthCallbackUrl(browserOrigin);
-
-      if (typeof document !== "undefined") {
-        if (nextPath !== "/dashboard") {
-          document.cookie = `pupis_auth_next=${encodeURIComponent(
-            nextPath
-          )}; Path=/; Max-Age=600; SameSite=Lax`;
-        } else {
-          document.cookie = "pupis_auth_next=; Path=/; Max-Age=0; SameSite=Lax";
-        }
-      }
-
-      const { error } = await supabase.auth.signInWithOtp({
+      const { data, error } = await supabase.auth.signInWithPassword({
         email: normalizedEmail,
-        options: {
-          shouldCreateUser: true,
-          emailRedirectTo,
-        },
+        password,
       });
 
-      if (error) {
+      if (error || !data.user) {
         setFormError(
-          error.message || "Unable to send Magic Link & OTP to this campus email."
+          error?.message || "Invalid campus email or password. Please try again."
         );
         return;
       }
 
-      setOtpSentTo(normalizedEmail);
-      setInfoMessage(
-        `Check ${normalizedEmail} for your Magic Link or 6-digit one-time verification code.`
-      );
-    } catch (err) {
-      setFormError(
-        err instanceof Error
-          ? err.message
-          : "Network error while requesting campus sign-in link."
-      );
-    } finally {
-      setIsOtpLoading(false);
-    }
-  };
-
-  const handleVerifyOtpCode = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!otpSentTo) return;
-
-    if (!isAllowedInstitutionalEmail(otpSentTo)) {
-      setFormError(
-        "Only @student.president.ac.id and @president.ac.id email addresses are permitted."
-      );
-      return;
-    }
-
-    const cleanToken = otpToken.trim();
-    if (cleanToken.length < 6) {
-      setFormError("Please enter the verification code sent to your email.");
-      return;
-    }
-
-    setFormError("");
-    setIsVerifyLoading(true);
-    try {
-      const supabase = createClient();
-      const { data, error } = await supabase.auth.verifyOtp({
-        email: otpSentTo,
-        token: cleanToken,
-        type: "email",
-      });
-
-      if (error) {
-        setFormError(
-          error.message ||
-            "Invalid or expired verification code. Please try again."
-        );
-        return;
-      }
-
-      const verifiedEmail = data.user?.email?.trim().toLowerCase() ?? "";
+      const verifiedEmail = data.user.email?.trim().toLowerCase() ?? "";
       if (!verifiedEmail || !isAllowedInstitutionalEmail(verifiedEmail)) {
         await supabase.auth.signOut();
         setFormError(
@@ -189,17 +122,25 @@ function LoginFormContent() {
         return;
       }
 
-      // Ensure campus profile exists in public.users after OTP verification
+      // Server-side profile check & idempotent initialization in `public.users` via Service Role
+      const headers: Record<string, string> = {};
+      if (data.session?.access_token) {
+        headers.Authorization = `Bearer ${data.session.access_token}`;
+      }
+
       const syncResponse = await fetch("/api/auth/otp", {
         method: "PUT",
+        credentials: "same-origin",
+        headers,
       });
+
       if (!syncResponse.ok) {
         const syncPayload = (await syncResponse.json().catch(() => null)) as {
           error?: { message?: string };
         } | null;
         setFormError(
           syncPayload?.error?.message ??
-            "Unable to initialize your campus profile. Please try again."
+            "Unable to initialize your campus profile. Please contact Student Affairs IT support."
         );
         return;
       }
@@ -210,10 +151,10 @@ function LoginFormContent() {
       setFormError(
         err instanceof Error
           ? err.message
-          : "Unable to verify one-time code."
+          : "Network error while signing in to campus workspace."
       );
     } finally {
-      setIsVerifyLoading(false);
+      setIsSubmitting(false);
     }
   };
 
@@ -225,18 +166,18 @@ function LoginFormContent() {
           PU
         </div>
         <h1 className="mt-4 text-2xl font-bold tracking-tight text-[#0F172A]">
-          Institutional Sign In
+          Sign in to PUPIS
         </h1>
         <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
-          Enter your official{" "}
+          Use your official President University institutional email (
           <span className="font-mono font-medium text-slate-700">
             @student.president.ac.id
           </span>{" "}
           or{" "}
           <span className="font-mono font-medium text-slate-700">
             @president.ac.id
-          </span>{" "}
-          email to receive a Magic Link &amp; one-time code.
+          </span>
+          ).
         </p>
       </div>
 
@@ -273,120 +214,120 @@ function LoginFormContent() {
         </div>
       )}
 
-      {/* Institutional Email Magic Link / OTP Form */}
-      <div className="mt-6">
-        {!otpSentTo ? (
-          <form onSubmit={handleRequestOtp} className="space-y-4">
-            <div>
-              <label
-                htmlFor="campus-email"
-                className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-              >
-                Institutional Email
-              </label>
+      {/* Institutional Email + Password Form */}
+      <div className="mt-7">
+        <form onSubmit={handleSignIn} className="space-y-4">
+          <div>
+            <label
+              htmlFor="campus-email"
+              className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+            >
+              Campus Email
+            </label>
+            <input
+              id="campus-email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="name@student.president.ac.id"
+              className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm text-[#0F172A] placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label
+              htmlFor="campus-password"
+              className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
+            >
+              Password
+            </label>
+            <div className="relative mt-1.5">
               <input
-                id="campus-email"
-                type="email"
-                autoComplete="email"
+                id="campus-password"
+                type={showPassword ? "text" : "password"}
+                autoComplete="current-password"
                 required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@student.president.ac.id"
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 text-sm text-[#0F172A] placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Enter your password"
+                className="w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] py-2.5 pr-11 pl-3.5 text-sm text-[#0F172A] placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
               />
-              <p className="mt-1.5 text-[11px] text-slate-500">
-                Students (<span className="font-mono">@student.president.ac.id</span>) and Staff / Advisors (<span className="font-mono">@president.ac.id</span>) sign in here.
-              </p>
-            </div>
-
-            {formError && (
-              <div
-                role="alert"
-                className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700"
+              <button
+                type="button"
+                onClick={() => setShowPassword((prev) => !prev)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
+                className="absolute inset-y-0 right-0 flex items-center pr-3.5 text-slate-400 transition hover:text-[#0F172A] focus-visible:text-[#1E3A8A] focus-visible:outline-none cursor-pointer"
               >
-                {formError}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={isOtpLoading}
-              className="w-full rounded-full bg-[#0F172A] px-5 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-60 cursor-pointer"
-            >
-              {isOtpLoading
-                ? "Sending Verification Link..."
-                : "Send Magic Link & OTP Code"}
-            </button>
-          </form>
-        ) : (
-          <form onSubmit={handleVerifyOtpCode} className="space-y-4">
-            {infoMessage && (
-              <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-3 text-xs leading-relaxed text-emerald-900">
-                <p className="font-bold">Verification Sent</p>
-                <p className="mt-0.5">{infoMessage}</p>
-              </div>
-            )}
-
-            <div>
-              <div className="flex items-center justify-between">
-                <label
-                  htmlFor="otp-token"
-                  className="block text-xs font-bold uppercase tracking-wider text-[#0F172A]"
-                >
-                  One-Time Code (Or click link in email)
-                </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOtpSentTo(null);
-                    setOtpToken("");
-                    setFormError("");
-                    setInfoMessage("");
-                  }}
-                  className="text-xs font-semibold text-[#1E3A8A] hover:underline cursor-pointer"
-                >
-                  Change email
-                </button>
-              </div>
-              <input
-                id="otp-token"
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={otpToken}
-                onChange={(e) => setOtpToken(e.target.value)}
-                placeholder="Enter verification code"
-                className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2.5 font-mono text-sm tracking-widest text-[#0F172A] placeholder:tracking-normal placeholder:text-slate-400 focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
-              />
+                {showPassword ? (
+                  /* EyeOff icon */
+                  <svg
+                    className="h-4 w-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    aria-hidden="true"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"
+                    />
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M1 1l22 22"
+                    />
+                  </svg>
+                ) : (
+                  /* Eye icon */
+                  <svg
+                    className="h-4 w-4"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    aria-hidden="true"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
+                    />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                )}
+              </button>
             </div>
+          </div>
 
-            {formError && (
-              <div
-                role="alert"
-                className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700"
-              >
-                {formError}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={isVerifyLoading}
-              className="w-full rounded-full bg-[#0F172A] px-5 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-60 cursor-pointer"
+          {formError && (
+            <div
+              role="alert"
+              className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs font-medium text-rose-700"
             >
-              {isVerifyLoading
-                ? "Verifying Code..."
-                : "Verify & Enter Workspace"}
-            </button>
-          </form>
-        )}
+              {formError}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="w-full rounded-full bg-[#0F172A] px-5 py-3 text-sm font-semibold text-white shadow-xs transition hover:bg-[#1E3A8A] disabled:opacity-60 cursor-pointer"
+          >
+            {isSubmitting ? "Signing In..." : "Sign In"}
+          </button>
+        </form>
       </div>
 
       {/* Domain Security Notice */}
       <div className="mt-6 border-t border-[#E2E8F0] pt-4 text-center">
         <p className="text-[11px] leading-relaxed text-slate-400">
-          Protected by President University Zero-Trust Domain Guard. Non-campus
-          accounts are automatically rejected.
+          Restricted to official President University student and staff email
+          accounts.
         </p>
       </div>
     </div>
@@ -415,7 +356,7 @@ export default function CampusLoginPage() {
           href="/"
           className="text-xs font-semibold text-slate-600 transition hover:text-[#0F172A]"
         >
-          ← Back to Portal
+          ← Back to Home
         </Link>
       </header>
 

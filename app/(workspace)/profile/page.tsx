@@ -1,8 +1,10 @@
 import React, { Suspense } from "react";
+import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
 import ProfileSignatureClient from "@/components/ProfileSignatureClient";
 
 async function ProfileLoaderSection() {
+  await connection();
   const profile = await requireAuth();
 
   return (
