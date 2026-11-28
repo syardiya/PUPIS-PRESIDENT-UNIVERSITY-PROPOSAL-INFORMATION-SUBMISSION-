@@ -411,8 +411,7 @@ export default function ReviewerDecisionPanel({
 
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#E2E8F0] pt-4">
           <span className="text-[11px] text-slate-500">
-            Every decision is permanently recorded in the immutable{" "}
-            <span className="font-mono">revision_logs</span> audit trail.
+            Every decision is permanently recorded in the approval history.
           </span>
 
           <button

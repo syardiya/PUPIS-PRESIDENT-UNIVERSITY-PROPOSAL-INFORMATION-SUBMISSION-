@@ -10,10 +10,16 @@ import {
 import type {
   AttachmentKindDb,
   BudgetLineItemDb,
+  FunctionalRoleDb,
   ProposalStatusDb,
   SignerStatusDb,
   UserRole,
 } from "@/src/lib/supabase/database.types";
+import {
+  canBeAssignedAsApprover,
+  formatFunctionalAuthorityLabel,
+  suggestApproverRoleTitle,
+} from "@/src/lib/proposals/approver-authority";
 
 export interface DirectoryCampusUser {
   id: string;
@@ -21,6 +27,7 @@ export interface DirectoryCampusUser {
   full_name: string;
   organization_unit: string | null;
   role: UserRole;
+  functional_role?: FunctionalRoleDb | null;
 }
 
 export interface WizardSignerRow {
@@ -28,6 +35,7 @@ export interface WizardSignerRow {
   email: string;
   full_name: string;
   role_title: string;
+  authority_label?: string;
   step_order: number;
   status: SignerStatusDb;
 }
@@ -112,10 +120,9 @@ const RAB_CATEGORIES = [
 ] as const;
 
 const ROLE_TITLE_PRESETS = [
-  "PUMA / PUFA Chairperson",
-  "BEM Executive Reviewer",
   "Faculty Advisor",
-  "Head of Study Program",
+  "Head of Study Program (Kaprodi)",
+  "Dean of Faculty",
   "Directorate of Student Affairs",
   "Vice Rector III — Student & Alumni",
 ] as const;
@@ -221,12 +228,29 @@ export default function ProposalCreationWizard({
     initialDirectoryUsers
   );
   const [directorySearch, setDirectorySearch] = useState<string>("");
+  const [isSearchingDirectory, setIsSearchingDirectory] =
+    useState<boolean>(false);
   const [selectedApproverId, setSelectedApproverId] = useState<string>("");
   const [selectedRoleTitle, setSelectedRoleTitle] = useState<string>(
-    ROLE_TITLE_PRESETS[2]
+    ROLE_TITLE_PRESETS[0]
   );
   const [selectedCcId, setSelectedCcId] = useState<string>("");
   const [routingError, setRoutingError] = useState<string>("");
+
+  const knownUsersRef = useRef<Map<string, DirectoryCampusUser>>(new Map());
+  useEffect(() => {
+    for (const u of initialDirectoryUsers) {
+      knownUsersRef.current.set(u.id, u);
+    }
+    for (const u of directoryUsers) {
+      knownUsersRef.current.set(u.id, u);
+    }
+  }, [initialDirectoryUsers, directoryUsers]);
+
+  const eligibleApproverUsers = useMemo(
+    () => directoryUsers.filter((u) => canBeAssignedAsApprover(u).allowed),
+    [directoryUsers]
+  );
 
   // Step 5: Supporting Attachments & Final Submit
   const [attachments, setAttachments] = useState<WizardAttachmentRow[]>(
@@ -475,32 +499,69 @@ export default function ProposalCreationWizard({
     };
   }, [serializedDraft, hasMeaningfulInput, persistDraftNow]);
 
-  // Live directory search when user types in Step 4 filter
+  // Live directory load & search when user types in Step 4 filter (or if initial directory was empty)
   useEffect(() => {
     const trimmed = directorySearch.trim();
-    if (trimmed === "") {
+    if (trimmed === "" && initialDirectoryUsers.length > 0) {
       return;
     }
 
+    let cancelled = false;
+    const delayMs = trimmed === "" ? 0 : 250;
+
     const timer = window.setTimeout(async () => {
+      setIsSearchingDirectory(true);
       try {
-        const res = await fetch(
-          `/api/users/directory?q=${encodeURIComponent(trimmed)}`
-        );
+        const endpoint =
+          trimmed === ""
+            ? "/api/users/directory"
+            : `/api/users/directory?q=${encodeURIComponent(trimmed)}`;
+        const res = await fetch(endpoint);
         const json = (await res.json()) as {
           ok?: boolean;
           users?: DirectoryCampusUser[];
+          error?: { message?: string };
         };
+        if (cancelled) return;
+
         if (res.ok && json.ok && json.users) {
+          for (const u of json.users) {
+            knownUsersRef.current.set(u.id, u);
+          }
           setDirectoryUsers(json.users);
+
+          if (trimmed !== "") {
+            const matchingApprovers = json.users.filter(
+              (u) => canBeAssignedAsApprover(u).allowed
+            );
+            if (matchingApprovers.length === 1) {
+              setSelectedApproverId(matchingApprovers[0].id);
+              setSelectedRoleTitle(
+                suggestApproverRoleTitle(matchingApprovers[0])
+              );
+            }
+          }
+        } else if (!res.ok) {
+          setRoutingError(
+            json.error?.message ?? "Unable to search campus user directory."
+          );
         }
       } catch {
-        // Keep current directory list on transient error
+        if (!cancelled) {
+          setRoutingError("Network error while searching campus directory.");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSearchingDirectory(false);
+        }
       }
-    }, 300);
+    }, delayMs);
 
-    return () => window.clearTimeout(timer);
-  }, [directorySearch]);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [directorySearch, initialDirectoryUsers]);
 
   // Step 3 RAB Handlers
   const updateBudgetRow = (
@@ -553,8 +614,24 @@ export default function ProposalCreationWizard({
       return;
     }
 
-    const foundUser = directoryUsers.find((u) => u.id === selectedApproverId);
-    if (!foundUser) return;
+    const foundUser =
+      knownUsersRef.current.get(selectedApproverId) ??
+      directoryUsers.find((u) => u.id === selectedApproverId);
+    if (!foundUser) {
+      setRoutingError(
+        "Selected approver could not be resolved. Please choose an approver from the dropdown."
+      );
+      return;
+    }
+
+    const authorityCheck = canBeAssignedAsApprover(foundUser);
+    if (!authorityCheck.allowed) {
+      setRoutingError(
+        authorityCheck.reason ??
+          "Selected account is not authorized to act as an official proposal approver."
+      );
+      return;
+    }
 
     const nextStep = signers.length + 1;
     setSigners([
@@ -564,6 +641,7 @@ export default function ProposalCreationWizard({
         email: foundUser.email,
         full_name: foundUser.full_name,
         role_title: selectedRoleTitle.trim(),
+        authority_label: formatFunctionalAuthorityLabel(foundUser),
         step_order: nextStep,
         status: "pending",
       },
@@ -612,14 +690,26 @@ export default function ProposalCreationWizard({
 
   const handleAddCc = () => {
     setRoutingError("");
-    if (!selectedCcId) return;
+    if (!selectedCcId) {
+      setRoutingError(
+        "Please select a registered campus user from the CC observer dropdown."
+      );
+      return;
+    }
     if (ccUsers.some((c) => c.stakeholder_id === selectedCcId)) {
       setRoutingError("This stakeholder is already in the CC observer list.");
       return;
     }
 
-    const found = directoryUsers.find((u) => u.id === selectedCcId);
-    if (!found) return;
+    const found =
+      knownUsersRef.current.get(selectedCcId) ??
+      directoryUsers.find((u) => u.id === selectedCcId);
+    if (!found) {
+      setRoutingError(
+        "Selected CC recipient could not be resolved. Please choose from the dropdown."
+      );
+      return;
+    }
 
     setCcUsers([
       ...ccUsers,
@@ -1561,22 +1651,155 @@ export default function ProposalCreationWizard({
 
           {activeStep === 4 && (
             <div className="border-t border-[#E2E8F0] px-6 pt-5 pb-6">
+              {/* Approver Authority Notice */}
+              <div className="mb-4 rounded-xl border border-[#1E3A8A]/20 bg-[#1E3A8A]/[0.04] px-4 py-3 text-xs text-slate-700">
+                <strong className="text-[#0F172A]">
+                  Official Approver Policy:
+                </strong>{" "}
+                Only authorized institutional staff and approvers (such as Head
+                of Study Program / Kaprodi and Faculty Advisors) can be assigned
+                to the sequential TTD chain. Student accounts and Faculty
+                Secretary intake officers cannot be selected as decision
+                approvers.
+              </div>
+
               {/* Campus Directory Filter */}
               <div>
-                <label
-                  htmlFor="directory-search"
-                  className="block text-xs font-bold uppercase tracking-wider text-slate-500"
-                >
-                  Search Campus User Directory
-                </label>
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="directory-search"
+                    className="block text-xs font-bold uppercase tracking-wider text-slate-500"
+                  >
+                    Search Campus User Directory
+                  </label>
+                  {isSearchingDirectory && (
+                    <span className="text-[11px] font-medium text-[#1E3A8A]">
+                      Searching...
+                    </span>
+                  )}
+                </div>
                 <input
                   id="directory-search"
                   type="search"
                   value={directorySearch}
-                  onChange={(e) => setDirectorySearch(e.target.value)}
+                  onChange={(e) => {
+                    const nextVal = e.target.value;
+                    setDirectorySearch(nextVal);
+                    if (
+                      nextVal.trim() === "" &&
+                      initialDirectoryUsers.length > 0
+                    ) {
+                      setDirectoryUsers(initialDirectoryUsers);
+                    }
+                  }}
                   placeholder="Filter registered users by name, @president.ac.id email, or unit..."
                   className="mt-1.5 w-full rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] px-3.5 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:bg-white focus:outline-none"
                 />
+
+                {directorySearch.trim().length > 0 && (
+                  <div className="mt-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-2.5">
+                    {directoryUsers.length === 0 ? (
+                      <p className="text-xs text-slate-500">
+                        No registered campus users matched &ldquo;
+                        {directorySearch.trim()}&rdquo;.
+                      </p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {directoryUsers.slice(0, 6).map((u) => {
+                          const canApprove =
+                            canBeAssignedAsApprover(u).allowed;
+                          const alreadySigner = signers.some(
+                            (s) => s.approver_id === u.id
+                          );
+                          const alreadyCc = ccUsers.some(
+                            (c) => c.stakeholder_id === u.id
+                          );
+                          return (
+                            <div
+                              key={`match-${u.id}`}
+                              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#E2E8F0] bg-white px-3 py-2 text-xs"
+                            >
+                              <div className="min-w-0">
+                                <span className="font-bold text-[#0F172A]">
+                                  {u.full_name}
+                                </span>{" "}
+                                <span className="font-mono text-[11px] text-slate-500">
+                                  ({u.email})
+                                </span>{" "}
+                                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                                  {formatFunctionalAuthorityLabel(u)}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                {canApprove && (
+                                  <button
+                                    type="button"
+                                    disabled={alreadySigner}
+                                    onClick={() => {
+                                      setRoutingError("");
+                                      const roleTitle =
+                                        suggestApproverRoleTitle(u);
+                                      setSigners((prev) =>
+                                        prev.some((s) => s.approver_id === u.id)
+                                          ? prev
+                                          : [
+                                              ...prev,
+                                              {
+                                                approver_id: u.id,
+                                                email: u.email,
+                                                full_name: u.full_name,
+                                                role_title: roleTitle,
+                                                authority_label:
+                                                  formatFunctionalAuthorityLabel(
+                                                    u
+                                                  ),
+                                                step_order: prev.length + 1,
+                                                status: "pending",
+                                              },
+                                            ]
+                                      );
+                                    }}
+                                    className="rounded-full bg-[#0F172A] px-2.5 py-1 text-[11px] font-semibold text-white transition hover:bg-[#1E3A8A] disabled:opacity-40 cursor-pointer"
+                                  >
+                                    {alreadySigner
+                                      ? "Added Approver"
+                                      : "+ Add Approver"}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={alreadyCc}
+                                  onClick={() => {
+                                    setRoutingError("");
+                                    setCcUsers((prev) =>
+                                      prev.some(
+                                        (c) => c.stakeholder_id === u.id
+                                      )
+                                        ? prev
+                                        : [
+                                            ...prev,
+                                            {
+                                              stakeholder_id: u.id,
+                                              email: u.email,
+                                              full_name: u.full_name,
+                                              organization_unit:
+                                                u.organization_unit,
+                                            },
+                                          ]
+                                    );
+                                  }}
+                                  className="rounded-full border border-[#E2E8F0] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1E3A8A] transition hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                                >
+                                  {alreadyCc ? "Added CC" : "+ Add CC"}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {routingError && (
@@ -1621,6 +1844,13 @@ export default function ProposalCreationWizard({
                                 <span className="rounded bg-[#1E3A8A]/10 px-1.5 py-0.5 text-[10px] font-semibold text-[#1E3A8A]">
                                   {signer.role_title}
                                 </span>
+                                {signer.authority_label &&
+                                  signer.authority_label !==
+                                    signer.role_title && (
+                                    <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                                      {signer.authority_label}
+                                    </span>
+                                  )}
                               </div>
                               <p className="truncate font-mono text-[11px] text-slate-500">
                                 {signer.email}
@@ -1670,21 +1900,33 @@ export default function ProposalCreationWizard({
 
                   <div className="mt-4 space-y-2.5 border-t border-[#E2E8F0] pt-4">
                     <p className="text-xs font-bold text-[#0F172A]">
-                      Add Sequential Approver
+                      Add Official Sequential Approver
                     </p>
                     <select
                       aria-label="Select campus approver"
                       value={selectedApproverId}
-                      onChange={(e) => setSelectedApproverId(e.target.value)}
+                      onChange={(e) => {
+                        const chosenId = e.target.value;
+                        setSelectedApproverId(chosenId);
+                        const chosenUser = eligibleApproverUsers.find(
+                          (u) => u.id === chosenId
+                        );
+                        if (chosenUser) {
+                          setSelectedRoleTitle(
+                            suggestApproverRoleTitle(chosenUser)
+                          );
+                        }
+                      }}
                       className="w-full rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 text-xs text-[#0F172A] focus:border-[#1E3A8A] focus:outline-none"
                     >
                       <option value="">
-                        — Choose registered campus user ({directoryUsers.length}
-                        ) —
+                        — Choose authorized campus approver (
+                        {eligibleApproverUsers.length}) —
                       </option>
-                      {directoryUsers.map((u) => (
+                      {eligibleApproverUsers.map((u) => (
                         <option key={u.id} value={u.id}>
-                          {u.full_name} ({u.email}) • {u.role}
+                          {u.full_name} ({u.email}) •{" "}
+                          {formatFunctionalAuthorityLabel(u)}
                         </option>
                       ))}
                     </select>
@@ -1895,7 +2137,7 @@ export default function ProposalCreationWizard({
                       : "Upload Primary Proposal PDF"}
                   </span>
                   <span className="mt-0.5 text-[11px] text-slate-500">
-                    application/pdf • Max 10 MB
+                    PDF Document (.pdf) • Max 10 MB
                   </span>
                   <input
                     type="file"
@@ -2039,6 +2281,40 @@ export default function ProposalCreationWizard({
                       {isResubmission ? currentVersion + 1 : currentVersion}.0
                     </p>
                   </div>
+                </div>
+
+                {/* Ordered Approver Authority Preview Before Submit */}
+                <div className="mt-4 border-t border-[#E2E8F0] pt-4">
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Sequential Approver Order &amp; Authority Review
+                  </span>
+                  {signers.length === 0 ? (
+                    <p className="mt-1 text-xs font-semibold text-amber-800">
+                      ! Assign at least one authorized institutional approver in
+                      Step 4 before submitting.
+                    </p>
+                  ) : (
+                    <ol className="mt-2 flex flex-wrap items-center gap-2">
+                      {signers.map((s, idx) => (
+                        <li
+                          key={s.approver_id}
+                          className="inline-flex items-center gap-2 rounded-xl border border-[#E2E8F0] bg-white px-3 py-1.5 text-xs"
+                        >
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#0F172A] text-[10px] font-bold text-white">
+                            {idx + 1}
+                          </span>
+                          <div>
+                            <span className="font-bold text-[#0F172A]">
+                              {s.full_name}
+                            </span>{" "}
+                            <span className="text-slate-500">
+                              ({s.role_title})
+                            </span>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
                 </div>
 
                 <div className="mt-4 border-t border-[#E2E8F0] pt-4">

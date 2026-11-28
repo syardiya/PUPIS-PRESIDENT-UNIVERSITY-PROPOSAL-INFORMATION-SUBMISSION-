@@ -1,7 +1,9 @@
 import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, toAuthErrorResponse } from "@/src/lib/auth/guard";
+import { createAdminClient } from "@/src/lib/supabase/admin";
 import { createClient } from "@/src/lib/supabase/server";
+import { normalizeEnvValue } from "@/src/lib/supabase/url";
 import type { Json, ProposalStatusDb } from "@/src/lib/supabase/database.types";
 import { proposalDraftCreateSchema } from "@/src/lib/validations/proposal";
 import {
@@ -25,6 +27,8 @@ function mapStatusFilter(raw: string | null): ProposalStatusDb | null {
       return "needs_revision";
     case "approved":
       return "approved";
+    case "completed":
+      return "completed";
     case "rejected":
       return "rejected";
     default:
@@ -53,7 +57,7 @@ export async function GET(request: NextRequest) {
     let query = supabase
       .from("proposals")
       .select(
-        "id, proposal_code, submitter_id, title, activity_type, organization_name, person_in_charge, event_date, event_end_date, venue, total_budget, status, current_version, created_at, updated_at",
+        "id, proposal_code, submitter_id, title, activity_type, organization_name, person_in_charge, submitted_at, event_date, event_end_date, venue, total_budget, status, secretary_review_status, current_version, created_at, updated_at",
         { count: "exact" }
       )
       .order("updated_at", { ascending: false })
@@ -147,9 +151,12 @@ export async function POST(request: NextRequest) {
 
     const data = parsed.data;
     const supabase = await createClient();
+    const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+      ? createAdminClient()
+      : supabase;
 
     const resolvedRouting = await resolveSignersAndCcUsers(
-      supabase,
+      dbClient,
       data.signers,
       data.cc_users
     );
@@ -176,7 +183,7 @@ export async function POST(request: NextRequest) {
 
     const proposalCode = generateProposalCode();
 
-    const { data: created, error: insertError } = await supabase
+    const { data: created, error: insertError } = await dbClient
       .from("proposals")
       .insert({
         proposal_code: proposalCode,
@@ -217,7 +224,7 @@ export async function POST(request: NextRequest) {
       resolvedRouting.ccStakeholderIds !== undefined
     ) {
       const routingResult = await syncProposalRouting(
-        supabase,
+        dbClient,
         created.id,
         resolvedRouting.signers,
         resolvedRouting.ccStakeholderIds

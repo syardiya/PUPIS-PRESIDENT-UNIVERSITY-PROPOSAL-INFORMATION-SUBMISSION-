@@ -10,8 +10,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
   BudgetLineItemDb,
   Database,
+  FunctionalRoleDb,
   Json,
+  UserRole,
 } from "../supabase/database.types";
+import { canBeAssignedAsApprover } from "./approver-authority";
 import {
   computeBudgetItemsGrandTotal,
   type ccUserRecipientSchema,
@@ -176,13 +179,22 @@ export async function resolveSignersAndCcUsers(
     }
   }
 
-  const userById = new Map<string, { id: string; email: string }>();
-  const userByEmail = new Map<string, { id: string; email: string }>();
+  interface DirectoryLookupRow {
+    id: string;
+    email: string;
+    full_name: string;
+    role: UserRole;
+    functional_role: FunctionalRoleDb | null;
+    organization_unit: string | null;
+  }
+
+  const userById = new Map<string, DirectoryLookupRow>();
+  const userByEmail = new Map<string, DirectoryLookupRow>();
 
   if (idsToVerify.size > 0) {
     const { data: idRows, error: idErr } = await supabase
       .from("users")
-      .select("id, email")
+      .select("id, email, full_name, role, functional_role, organization_unit")
       .in("id", Array.from(idsToVerify));
 
     if (idErr) {
@@ -197,7 +209,7 @@ export async function resolveSignersAndCcUsers(
   if (emailsToLookup.size > 0) {
     const { data: emailRows, error: emailErr } = await supabase
       .from("users")
-      .select("id, email")
+      .select("id, email, full_name, role, functional_role, organization_unit")
       .in("email", Array.from(emailsToLookup));
 
     if (emailErr) {
@@ -225,6 +237,16 @@ export async function resolveSignersAndCcUsers(
           error: `Approver '${
             s.approver_email ?? s.approver_id
           }' is not yet registered in PUPIS. Please select a registered campus user.`,
+        };
+      }
+
+      const authorityCheck = canBeAssignedAsApprover(matched);
+      if (!authorityCheck.allowed) {
+        return {
+          ok: false,
+          error: `Approver '${matched.full_name} (${matched.email})' cannot be assigned: ${
+            authorityCheck.reason ?? "Insufficient approver authority."
+          }`,
         };
       }
 
@@ -407,7 +429,7 @@ export async function fetchHydratedProposalDetail(
   const { data: proposal, error: propError } = await supabase
     .from("proposals")
     .select(
-      "*, submitter:submitter_id(id, email, full_name, organization_unit, role)"
+      "*, submitter:submitter_id(id, email, full_name, organization_unit, role, functional_role), secretary_reviewer:secretary_reviewed_by(id, email, full_name, organization_unit, role, functional_role), final_signer:final_signed_by(id, email, full_name, organization_unit, role, functional_role)"
     )
     .eq("id", proposalId)
     .maybeSingle();
@@ -425,14 +447,14 @@ export async function fetchHydratedProposalDetail(
     supabase
       .from("proposal_signers")
       .select(
-        "*, users:approver_id(id, email, full_name, organization_unit, role)"
+        "*, users:approver_id(id, email, full_name, organization_unit, role, functional_role)"
       )
       .eq("proposal_id", proposalId)
       .order("step_order", { ascending: true }),
     supabase
       .from("proposal_cc")
       .select(
-        "id, proposal_id, stakeholder_id, added_at, users:stakeholder_id(id, email, full_name, organization_unit, role)"
+        "id, proposal_id, stakeholder_id, added_at, users:stakeholder_id(id, email, full_name, organization_unit, role, functional_role)"
       )
       .eq("proposal_id", proposalId)
       .order("added_at", { ascending: true }),
@@ -444,7 +466,7 @@ export async function fetchHydratedProposalDetail(
     supabase
       .from("revision_logs")
       .select(
-        "*, users:actor_id(id, email, full_name, organization_unit, role)"
+        "*, users:actor_id(id, email, full_name, organization_unit, role, functional_role)"
       )
       .eq("proposal_id", proposalId)
       .order("created_at", { ascending: true }),
@@ -455,9 +477,19 @@ export async function fetchHydratedProposalDetail(
     .filter((s) => s.status === "pending")
     .map((s) => s.step_order)
     .sort((a, b) => a - b);
+
+  const nextPendingStepOrder =
+    pendingOrders.length > 0 ? pendingOrders[0] : null;
+
+  const isHeldForSecretaryIntake =
+    proposal.secretary_review_status === "pending_review" ||
+    proposal.secretary_review_status === "clarification_needed";
+
   const lowestPendingStepOrder =
-    proposal.status === "pending_ttd" && pendingOrders.length > 0
-      ? pendingOrders[0]
+    proposal.status === "pending_ttd" &&
+    !isHeldForSecretaryIntake &&
+    nextPendingStepOrder !== null
+      ? nextPendingStepOrder
       : null;
 
   let optionalAdminStorageClient: SupabaseClient<Database> | null = null;
@@ -469,73 +501,125 @@ export async function fetchHydratedProposalDetail(
     }
   }
 
-  const [attachmentsWithUrls, signersWithUrls] = await Promise.all([
-    Promise.all(
-      (attachments ?? []).map(async (att) => {
-        const { data: signed } = await supabase.storage
-          .from(PROPOSAL_ATTACHMENTS_BUCKET)
-          .createSignedUrl(att.storage_path, ATTACHMENT_SIGNED_URL_TTL_SECONDS);
-
-        let resolvedUrl = signed?.signedUrl ?? null;
-        if (!resolvedUrl && optionalAdminStorageClient) {
-          const { data: adminSigned } = await optionalAdminStorageClient.storage
+  const [attachmentsWithUrls, signersWithUrls, finalSignatureSignedUrl] =
+    await Promise.all([
+      Promise.all(
+        (attachments ?? []).map(async (att) => {
+          const { data: signed } = await supabase.storage
             .from(PROPOSAL_ATTACHMENTS_BUCKET)
-            .createSignedUrl(
-              att.storage_path,
-              ATTACHMENT_SIGNED_URL_TTL_SECONDS
-            );
-          resolvedUrl = adminSigned?.signedUrl ?? null;
-        }
+            .createSignedUrl(att.storage_path, ATTACHMENT_SIGNED_URL_TTL_SECONDS);
 
-        return {
-          ...att,
-          signed_url: resolvedUrl,
-        };
-      })
-    ),
-    Promise.all(
-      signerList.map(async (s) => {
-        let signatureSignedUrl: string | null = null;
-        if (s.status === "signed" && s.signature_storage_path) {
-          const { data: sigUrlData } = await supabase.storage
-            .from(SIGNATURES_BUCKET)
-            .createSignedUrl(s.signature_storage_path, SIGNED_URL_TTL_SECONDS);
-          signatureSignedUrl = sigUrlData?.signedUrl ?? null;
-
-          if (!signatureSignedUrl && optionalAdminStorageClient) {
-            const { data: adminSigUrl } =
-              await optionalAdminStorageClient.storage
-                .from(SIGNATURES_BUCKET)
-                .createSignedUrl(
-                  s.signature_storage_path,
-                  SIGNED_URL_TTL_SECONDS
-                );
-            signatureSignedUrl = adminSigUrl?.signedUrl ?? null;
+          let resolvedUrl = signed?.signedUrl ?? null;
+          if (!resolvedUrl && optionalAdminStorageClient) {
+            const { data: adminSigned } = await optionalAdminStorageClient.storage
+              .from(PROPOSAL_ATTACHMENTS_BUCKET)
+              .createSignedUrl(
+                att.storage_path,
+                ATTACHMENT_SIGNED_URL_TTL_SECONDS
+              );
+            resolvedUrl = adminSigned?.signedUrl ?? null;
           }
-        }
 
-        return {
-          ...s,
-          approver: Array.isArray(s.users) ? s.users[0] ?? null : s.users ?? null,
-          is_active_turn:
-            lowestPendingStepOrder !== null &&
-            s.status === "pending" &&
-            s.step_order === lowestPendingStepOrder,
-          signature_signed_url: signatureSignedUrl,
-        };
-      })
-    ),
-  ]);
+          return {
+            ...att,
+            signed_url: resolvedUrl,
+          };
+        })
+      ),
+      Promise.all(
+        signerList.map(async (s) => {
+          let signatureSignedUrl: string | null = null;
+          if (s.status === "signed" && s.signature_storage_path) {
+            const { data: sigUrlData } = await supabase.storage
+              .from(SIGNATURES_BUCKET)
+              .createSignedUrl(s.signature_storage_path, SIGNED_URL_TTL_SECONDS);
+            signatureSignedUrl = sigUrlData?.signedUrl ?? null;
+
+            if (!signatureSignedUrl && optionalAdminStorageClient) {
+              const { data: adminSigUrl } =
+                await optionalAdminStorageClient.storage
+                  .from(SIGNATURES_BUCKET)
+                  .createSignedUrl(
+                    s.signature_storage_path,
+                    SIGNED_URL_TTL_SECONDS
+                  );
+              signatureSignedUrl = adminSigUrl?.signedUrl ?? null;
+            }
+          }
+
+          return {
+            ...s,
+            approver: Array.isArray(s.users) ? s.users[0] ?? null : s.users ?? null,
+            is_active_turn:
+              lowestPendingStepOrder !== null &&
+              s.status === "pending" &&
+              s.step_order === lowestPendingStepOrder,
+            signature_signed_url: signatureSignedUrl,
+          };
+        })
+      ),
+      (async () => {
+        if (!proposal.final_signature_path) return null;
+        const { data: finalSigData } = await supabase.storage
+          .from(SIGNATURES_BUCKET)
+          .createSignedUrl(
+            proposal.final_signature_path,
+            SIGNED_URL_TTL_SECONDS
+          );
+        if (finalSigData?.signedUrl) return finalSigData.signedUrl;
+        if (optionalAdminStorageClient) {
+          const { data: adminFinalSig } =
+            await optionalAdminStorageClient.storage
+              .from(SIGNATURES_BUCKET)
+              .createSignedUrl(
+                proposal.final_signature_path,
+                SIGNED_URL_TTL_SECONDS
+              );
+          return adminFinalSig?.signedUrl ?? null;
+        }
+        return null;
+      })(),
+    ]);
 
   const submitterUser = Array.isArray(proposal.submitter)
     ? proposal.submitter[0] ?? null
     : proposal.submitter ?? null;
 
+  const secretaryReviewerUser = Array.isArray(proposal.secretary_reviewer)
+    ? proposal.secretary_reviewer[0] ?? null
+    : proposal.secretary_reviewer ?? null;
+
+  const finalSignerUser = Array.isArray(proposal.final_signer)
+    ? proposal.final_signer[0] ?? null
+    : proposal.final_signer ?? null;
+
+  const parsedBudgetItems = parseBudgetItemsFromJson(proposal.budget_items);
+  const hasPrimaryPdf = attachmentsWithUrls.some(
+    (att) =>
+      att.attachment_kind === "primary_proposal_pdf" ||
+      att.mime_type === "application/pdf"
+  );
+
   return {
     ...proposal,
     submitter: submitterUser,
+    secretary_reviewer: secretaryReviewerUser,
+    final_signer: finalSignerUser,
+    final_signature_signed_url: finalSignatureSignedUrl,
     active_step_order: lowestPendingStepOrder,
-    budget_items: parseBudgetItemsFromJson(proposal.budget_items),
+    next_pending_step_order: nextPendingStepOrder,
+    budget_items: parsedBudgetItems,
+    document_completeness: {
+      has_primary_pdf: hasPrimaryPdf,
+      attachments_count: attachmentsWithUrls.length,
+      rab_items_count: parsedBudgetItems.length,
+      signers_count: signersWithUrls.length,
+      is_complete:
+        hasPrimaryPdf &&
+        attachmentsWithUrls.length > 0 &&
+        parsedBudgetItems.length > 0 &&
+        signersWithUrls.length > 0,
+    },
     signers: signersWithUrls,
     cc_users: (ccRows ?? []).map((c) => ({
       ...c,

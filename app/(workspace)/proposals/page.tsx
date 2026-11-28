@@ -4,6 +4,10 @@ import { connection } from "next/server";
 import { requireAuth } from "@/src/lib/auth/guard";
 import { createClient } from "@/src/lib/supabase/server";
 import type { ProposalStatusDb } from "@/src/lib/supabase/database.types";
+import {
+  describeProposalActiveStage,
+  type SignerStepBrief,
+} from "@/src/lib/proposals/approver-authority";
 
 type StatusTabKey =
   | "all"
@@ -11,6 +15,7 @@ type StatusTabKey =
   | "in_review"
   | "revision_requested"
   | "approved"
+  | "completed"
   | "rejected";
 
 const STATUS_TABS: ReadonlyArray<{
@@ -27,11 +32,18 @@ const STATUS_TABS: ReadonlyArray<{
     dbStatus: "needs_revision",
   },
   { key: "approved", label: "Approved", dbStatus: "approved" },
+  { key: "completed", label: "Completed", dbStatus: "completed" },
   { key: "rejected", label: "Rejected", dbStatus: "rejected" },
 ];
 
 function getStatusBadge(status: ProposalStatusDb) {
   switch (status) {
+    case "completed":
+      return {
+        label: "Completed",
+        classes: "bg-emerald-100/80 text-emerald-900 border-emerald-300",
+        dotClasses: "bg-emerald-700",
+      };
     case "approved":
       return {
         label: "Approved",
@@ -72,6 +84,21 @@ function formatIdr(amount: number): string {
     currency: "IDR",
     maximumFractionDigits: 0,
   }).format(Number.isFinite(amount) ? amount : 0);
+}
+
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(iso));
+  } catch {
+    return iso;
+  }
 }
 
 function normalizeTabKey(raw: string | undefined): StatusTabKey {
@@ -129,7 +156,7 @@ async function ProposalsListSection({
   let listQuery = supabase
     .from("proposals")
     .select(
-      "id, proposal_code, submitter_id, title, activity_type, organization_name, person_in_charge, event_date, event_end_date, venue, total_budget, status, current_version, updated_at",
+      "id, proposal_code, submitter_id, title, activity_type, organization_name, person_in_charge, submitted_at, event_date, event_end_date, venue, total_budget, status, secretary_review_status, current_version, updated_at",
       { count: "exact" }
     )
     .order("updated_at", { ascending: false })
@@ -155,12 +182,38 @@ async function ProposalsListSection({
   const totalCount = count ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
+  const proposalIds = list.map((p) => p.id);
+  const { data: signersRows } =
+    proposalIds.length > 0
+      ? await supabase
+          .from("proposal_signers")
+          .select(
+            "proposal_id, step_order, role_title, status, users:approver_id(full_name)"
+          )
+          .in("proposal_id", proposalIds)
+          .order("step_order", { ascending: true })
+      : { data: [] };
+
+  const signersByProposal = new Map<string, SignerStepBrief[]>();
+  for (const s of signersRows ?? []) {
+    const userObj = Array.isArray(s.users) ? s.users[0] ?? null : s.users ?? null;
+    const arr = signersByProposal.get(s.proposal_id) ?? [];
+    arr.push({
+      step_order: s.step_order,
+      role_title: s.role_title,
+      status: s.status,
+      approver_name: userObj?.full_name ?? null,
+    });
+    signersByProposal.set(s.proposal_id, arr);
+  }
+
   const statusCounts: Record<StatusTabKey, number> = {
     all: (allStatusesRows ?? []).length,
     draft: 0,
     in_review: 0,
     revision_requested: 0,
     approved: 0,
+    completed: 0,
     rejected: 0,
   };
 
@@ -170,6 +223,7 @@ async function ProposalsListSection({
     else if (row.status === "needs_revision")
       statusCounts.revision_requested += 1;
     else if (row.status === "approved") statusCounts.approved += 1;
+    else if (row.status === "completed") statusCounts.completed += 1;
     else if (row.status === "rejected") statusCounts.rejected += 1;
   }
 
@@ -293,6 +347,11 @@ async function ProposalsListSection({
           <div className="mt-4 space-y-3.5">
             {list.map((proposal) => {
               const badge = getStatusBadge(proposal.status);
+              const stageInfo = describeProposalActiveStage({
+                status: proposal.status,
+                secretaryReviewStatus: proposal.secretary_review_status,
+                signers: signersByProposal.get(proposal.id) ?? [],
+              });
               const canEdit =
                 (proposal.status === "draft" ||
                   proposal.status === "needs_revision") &&
@@ -339,6 +398,21 @@ async function ProposalsListSection({
                   <h2 className="mt-0.5 truncate text-base font-bold text-[#0F172A]">
                     {proposal.title || "Untitled Proposal Draft"}
                   </h2>
+
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                    <span>
+                      Active Stage:{" "}
+                      <strong className="font-semibold text-[#0F172A]">
+                        {stageInfo.activeStageLabel}
+                      </strong>
+                    </span>
+                    <span className="text-slate-500">
+                      ({stageInfo.progressLabel})
+                    </span>
+                    <span className="text-slate-500">
+                      Updated: {formatDateTime(proposal.updated_at)}
+                    </span>
+                  </div>
 
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3">
                     <p className="text-xs text-slate-500">

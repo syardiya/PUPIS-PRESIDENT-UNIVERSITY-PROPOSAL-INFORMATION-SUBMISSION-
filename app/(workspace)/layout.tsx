@@ -68,6 +68,7 @@ async function AuthenticatedWorkspaceContainer({
         email: profile.email,
         full_name: profile.full_name,
         role: profile.role,
+        functional_role: profile.functional_role,
         organization_unit: profile.organization_unit,
         has_signature: Boolean(profile.signature_storage_path),
         has_assigned_approvals: (assignedApprovalsCount ?? 0) > 0,

@@ -1,7 +1,9 @@
 import { revalidatePath } from "next/cache";
 import { NextResponse, type NextRequest } from "next/server";
 import { requireAuth, toAuthErrorResponse } from "@/src/lib/auth/guard";
+import { createAdminClient } from "@/src/lib/supabase/admin";
 import { createClient } from "@/src/lib/supabase/server";
+import { normalizeEnvValue } from "@/src/lib/supabase/url";
 import type { Database, Json } from "@/src/lib/supabase/database.types";
 import {
   proposalDraftUpdateSchema,
@@ -13,6 +15,10 @@ import {
   resolveSignersAndCcUsers,
   syncProposalRouting,
 } from "@/src/lib/proposals/server-helpers";
+import {
+  isFacultySecretaryProfile,
+  isStudentAffairsProfile,
+} from "@/src/lib/proposals/approver-authority";
 
 export async function GET(
   _request: NextRequest,
@@ -36,7 +42,10 @@ export async function GET(
     }
 
     const supabase = await createClient();
-    const detail = await fetchHydratedProposalDetail(supabase, idCheck.data);
+    const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+      ? createAdminClient()
+      : supabase;
+    const detail = await fetchHydratedProposalDetail(dbClient, idCheck.data);
 
     if (!detail) {
       return NextResponse.json(
@@ -55,7 +64,10 @@ export async function GET(
       profile.role === "admin" ||
       detail.submitter_id === profile.id ||
       detail.signers.some((s) => s.approver_id === profile.id) ||
-      detail.cc_users.some((c) => c.stakeholder_id === profile.id);
+      detail.cc_users.some((c) => c.stakeholder_id === profile.id) ||
+      (detail.status !== "draft" &&
+        (isFacultySecretaryProfile(profile) ||
+          isStudentAffairsProfile(profile)));
 
     if (!isAuthorizedViewer) {
       return NextResponse.json(
@@ -141,8 +153,11 @@ export async function PATCH(
     }
 
     const supabase = await createClient();
+    const dbClient = normalizeEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY)
+      ? createAdminClient()
+      : supabase;
 
-    const { data: existing, error: fetchError } = await supabase
+    const { data: existing, error: fetchError } = await dbClient
       .from("proposals")
       .select("id, submitter_id, status, event_date")
       .eq("id", idCheck.data)
@@ -206,7 +221,7 @@ export async function PATCH(
     }
 
     const resolvedRouting = await resolveSignersAndCcUsers(
-      supabase,
+      dbClient,
       data.signers,
       data.cc_users
     );
@@ -251,7 +266,7 @@ export async function PATCH(
       updatePayload.total_budget = data.total_budget;
     }
 
-    const { data: updatedProposal, error: updateError } = await supabase
+    const { data: updatedProposal, error: updateError } = await dbClient
       .from("proposals")
       .update(updatePayload)
       .eq("id", existing.id)
@@ -275,7 +290,7 @@ export async function PATCH(
       resolvedRouting.ccStakeholderIds !== undefined
     ) {
       const syncResult = await syncProposalRouting(
-        supabase,
+        dbClient,
         existing.id,
         resolvedRouting.signers,
         resolvedRouting.ccStakeholderIds

@@ -3,7 +3,14 @@
 import React, { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import type { UserRole } from "@/src/lib/supabase/database.types";
+import type {
+  FunctionalRoleDb,
+  UserRole,
+} from "@/src/lib/supabase/database.types";
+import {
+  formatFunctionalAuthorityLabel,
+  isFacultySecretaryProfile,
+} from "@/src/lib/proposals/approver-authority";
 import NotificationBellPopover, {
   type WorkspaceNotificationItem,
 } from "./NotificationBellPopover";
@@ -13,6 +20,7 @@ export interface WorkspaceShellUser {
   email: string;
   full_name: string;
   role: UserRole;
+  functional_role?: FunctionalRoleDb | null;
   organization_unit: string | null;
   has_signature: boolean;
   has_assigned_approvals?: boolean;
@@ -60,25 +68,28 @@ const NAV_ITEMS: NavItem[] = [
   },
 ];
 
-function getRoleBadgeMeta(role: UserRole): { label: string; classes: string } {
-  switch (role) {
-    case "admin":
-      return {
-        label: "Administrator",
-        classes: "bg-indigo-100 text-indigo-900 border-indigo-200",
-      };
-    case "staff":
-      return {
-        label: "Approver / Staff",
-        classes: "bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/20",
-      };
-    case "student":
-    default:
-      return {
-        label: "Student Org Submitter",
-        classes: "bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/20",
-      };
+function getRoleBadgeMeta(user: WorkspaceShellUser): {
+  label: string;
+  classes: string;
+} {
+  if (user.role === "admin") {
+    return {
+      label: "Administrator",
+      classes: "bg-indigo-100 text-indigo-900 border-indigo-200",
+    };
   }
+  if (user.role === "staff") {
+    return {
+      label: user.functional_role
+        ? formatFunctionalAuthorityLabel(user)
+        : "Approver / Staff",
+      classes: "bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/20",
+    };
+  }
+  return {
+    label: "Student Org Submitter",
+    classes: "bg-[#1E3A8A]/10 text-[#1E3A8A] border-[#1E3A8A]/20",
+  };
 }
 
 export default function WorkspaceShell({
@@ -112,14 +123,26 @@ export default function WorkspaceShell({
     };
   }, []);
 
+  const isSecretary = isFacultySecretaryProfile(user);
+  const isStudentAffairsOfficer = user.functional_role === "student_affairs";
+  const requiresSignature = !isSecretary;
+
   const visibleNavItems = NAV_ITEMS.filter((item) => {
     if (item.href === "/approvals" && user.has_assigned_approvals) {
       return true;
     }
     return item.visible(user.role);
+  }).map((item) => {
+    if (item.href === "/approvals" && isSecretary) {
+      return { ...item, label: "Secretary Intake" };
+    }
+    if (item.href === "/approvals" && isStudentAffairsOfficer) {
+      return { ...item, label: "Final Signature" };
+    }
+    return item;
   });
 
-  const roleBadge = getRoleBadgeMeta(user.role);
+  const roleBadge = getRoleBadgeMeta(user);
 
   const initials = user.full_name
     .split(" ")
@@ -254,7 +277,7 @@ export default function WorkspaceShell({
               >
                 <span className="relative flex h-7 w-7 items-center justify-center rounded-full bg-[#1E3A8A] text-[11px] font-bold text-white">
                   {initials || "PU"}
-                  {!user.has_signature && (
+                  {requiresSignature && !user.has_signature && (
                     <span
                       title="Digital Signature (TTD) not configured yet"
                       className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-amber-500"
@@ -330,7 +353,7 @@ export default function WorkspaceShell({
                         </svg>
                         <span>Profile &amp; Signature (TTD)</span>
                       </span>
-                      {!user.has_signature && (
+                      {requiresSignature && !user.has_signature && (
                         <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
                           Setup TTD
                         </span>
@@ -401,7 +424,7 @@ export default function WorkspaceShell({
                 }`}
               >
                 <span>Profile &amp; Signature</span>
-                {!user.has_signature && (
+                {requiresSignature && !user.has_signature && (
                   <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
                     Setup TTD
                   </span>
@@ -422,7 +445,7 @@ export default function WorkspaceShell({
             <strong className="font-semibold text-slate-600">PUPIS</strong> •
             President University Proposal Information Submission
           </span>
-          <span>Directorate of Student Affairs • Zero-Trust TTD Governance</span>
+          <span>Directorate of Student Affairs • Jababeka Campus</span>
         </div>
       </footer>
     </div>
